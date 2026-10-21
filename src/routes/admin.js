@@ -7,12 +7,21 @@ const { crud, clean } = require('../utils/crud');
 const { authorize } = require('../middleware/auth');
 const { validate, audit } = require('../middleware/common');
 const { HttpError } = require('../utils/helpers');
+const tenants = require('../services/tenants');
 
 // ---- Users ----
 const users = express.Router();
 users.use(audit('users'));
 
 const ADMIN_ROLES = ['super_admin', 'admin'];
+
+// Seat limit set by the platform owner (company.maxUsers); only active users count.
+async function assertSeatFree(req) {
+  const max = req.company?.maxUsers;
+  if (max && (await M.User.countDocuments({ company: req.companyId, active: true })) >= max) {
+    throw new HttpError(403, `Your plan allows ${max} active users. Deactivate a user or contact your provider.`);
+  }
+}
 // Admins may manage everyone except super admins; only a super admin can mint admins.
 function assertCanGrant(actor, role) {
   if (role === 'super_admin' && actor.role !== 'super_admin') throw new HttpError(403, 'Only a super admin can grant super_admin');
@@ -31,6 +40,7 @@ users.post('/', authorize('users', 'c'), validate(z.object({
 })), async (req, res) => {
   assertCanGrant(req.user, req.body.role);
   if (await M.User.exists({ email: req.body.email.toLowerCase() })) throw new HttpError(409, 'Email already registered');
+  await assertSeatFree(req);
   const u = await M.User.create({ ...req.body, password: await bcrypt.hash(req.body.password, 10), company: req.companyId });
   res.status(201).json({ id: u._id, name: u.name, email: u.email, role: u.role, branch: u.branch });
 });
@@ -44,6 +54,7 @@ users.patch('/:id', authorize('users', 'u'), validate(z.object({
   if (ADMIN_ROLES.includes(u.role) && req.user.role !== 'super_admin' && String(u._id) !== String(req.user._id)) throw new HttpError(403, 'Cannot modify an admin');
   if (req.body.role) assertCanGrant(req.user, req.body.role);
   if (String(u._id) === String(req.user._id) && (req.body.role || req.body.active === false)) throw new HttpError(400, 'You cannot change your own role or deactivate yourself');
+  if (req.body.active === true && !u.active) await assertSeatFree(req);
   const { password, ...rest } = req.body;
   u.set(rest);
   if (password) { u.password = await bcrypt.hash(password, 10); u.refreshTokens = []; }
@@ -57,12 +68,17 @@ const company = express.Router();
 company.use(audit('company'));
 company.get('/', authorize('company', 'r'), async (req, res) => {
   const co = await M.Company.findById(req.companyId);
-  res.json({ id: co._id, name: co.name, branches: co.branches, settings: co.settings, apiKey: ['super_admin', 'admin'].includes(req.user.role) ? co.apiKey : undefined });
+  res.json({
+    id: co._id, name: co.name, branches: co.branches, settings: co.settings, apiKey: ['super_admin', 'admin'].includes(req.user.role) ? co.apiKey : undefined,
+    // Read-only here: the platform owner sets these.
+    licence: { modules: co.modules, validUntil: co.validUntil, maxUsers: co.maxUsers, maxDevices: co.maxDevices, domains: co.domains.filter((d) => d.verified).map((d) => d.host) },
+  });
 });
 company.patch('/', authorize('company', 'u'), async (req, res) => {
   const co = await M.Company.findById(req.companyId);
   co.set(clean({ name: req.body.name, branches: req.body.branches, settings: req.body.settings }));
   await co.save();
+  tenants.invalidate(co);
   res.json(co);
 });
 company.post('/rotate-api-key', authorize('company', 'u'), async (req, res) => {

@@ -395,3 +395,20 @@ a.btn{text-decoration:none}
 .kb-row input{grid-column:1;grid-row:1}
 .kb-row button{grid-column:2;grid-row:1}
 .kb-row textarea{grid-column:1/-1;grid-row:2}
+
+/* ---------- offline status & company name ---------- */
+.coname{margin:-8px 8px 12px;font-size:12.5px;color:#fff;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.netpill{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:60;max-width:calc(100vw - 32px);text-align:center;padding:7px 14px;border-radius:99px;font-size:12.5px;font-weight:550;cursor:pointer;color:var(--ink);background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow)}
+.netpill.off{color:#fff;background:var(--warn);border-color:transparent}
+.netpill.bad{color:#fff;background:var(--bad);border-color:transparent}
+
+/* ---------- owner console ---------- */
+.owner{max-width:1180px;margin:0 auto;padding:24px 16px}
+.owner .top{margin-bottom:18px}
+.osec{border-top:1px solid var(--line);margin-top:18px;padding-top:4px}
+.osec h4{font-size:14px;margin:12px 0 2px}
+.modgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px}
+.modpick{display:flex;align-items:flex-start;margin:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer;color:var(--ink)}
+.modpick:has(input:checked){border-color:var(--brand);background:var(--brand-soft)}
+.modpick b{display:block;font-size:13px}
+.modpick small{display:block;font-weight:400;color:var(--mute);font-size:12px}

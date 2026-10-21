@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { phoneKey } = require('../utils/phone');
+const { MODULE_KEYS } = require('../modules');
 
 const { Schema } = mongoose;
 const { ObjectId, Mixed } = Schema.Types;
@@ -26,12 +27,48 @@ function make(name, def, setup) {
   return mongoose.model(name, schema);
 }
 
+// XXXX-XXXX-XXXX-XXXX from an alphabet without look-alike characters (0/O, 1/I).
+const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const activationKey = () => Array.from({ length: 4 }, () => Array.from(crypto.randomBytes(4), (b) => KEY_CHARS[b % 32]).join('')).join('-');
+
 const Company = make('Company', {
   name: { type: String, required: true },
   apiKey: { type: String, default: () => crypto.randomBytes(24).toString('hex'), index: true },
   branches: [{ name: String, address: String }],
   settings: { type: Mixed, default: {} },
+  // Licence, managed from the owner console (/owner.html).
+  modules: { type: [{ type: String, enum: MODULE_KEYS }], default: () => [...MODULE_KEYS] },
+  status: { type: String, enum: ['active', 'suspended'], default: 'active' },
+  suspendReason: String,
+  validUntil: Date, // empty = no expiry
+  maxUsers: Number, // empty = unlimited
+  maxDevices: Number, // desktop installs; empty = unlimited
+  activationKey: { type: String, default: activationKey, index: true },
+  // Client's own domains (crm.client.com -> CNAME to this server). Proven with a DNS TXT record.
+  domains: [{ _id: false, host: { type: String, lowercase: true, trim: true }, token: String, verified: { type: Boolean, default: false }, verifiedAt: Date }],
+  branding: { appName: String, color: String },
+}, (s) => s.index({ 'domains.host': 1 }));
+
+// Platform owner (you): manages every company from the owner console. Not tied to a company.
+const Owner = make('Owner', {
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  password: { type: String, required: true, select: false },
+  active: { type: Boolean, default: true },
 });
+
+// A desktop install activated with the company's activation key.
+const Device = make('Device', {
+  ...scoped,
+  deviceId: { type: String, required: true },
+  secretHash: { type: String, select: false },
+  name: String,
+  platform: String,
+  appVersion: String,
+  lastSeenAt: Date,
+  lastIp: String,
+  revoked: { type: Boolean, default: false },
+}, (s) => s.index({ company: 1, deviceId: 1 }, { unique: true }));
 
 const User = make('User', {
   ...scoped,
@@ -566,6 +603,6 @@ module.exports = {
   Employee, Attendance, LeaveRequest, Holiday, PayrollRun, Payslip,
   AdAccount, AdCampaign, AdCreative, AdMetric,
   ROLES, LEAD_STAGES, CHANNELS,
-  Company, User, Pipeline, Lead, Customer, Deal, Task, Communication, Template,
+  Company, Owner, Device, User, Pipeline, Lead, Customer, Deal, Task, Communication, Template,
   Campaign, CampaignEnrollment, Workflow, WorkflowRun, Activity, AuditLog, Notification, Webhook,
 };

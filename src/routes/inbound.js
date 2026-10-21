@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const M = require('../models');
 const config = require('../config');
 const { HttpError } = require('../utils/helpers');
+const { accessProblem } = require('../modules');
 const { logActivity, emit } = require('../services/events');
 const ai = require('../services/ai');
 const inbox = require('../services/inbox');
@@ -18,6 +19,7 @@ const safeEqual = (a = '', b = '') => {
 async function companyFromKey(key) {
   const co = key && (await M.Company.findOne({ apiKey: String(key) }));
   if (!co) throw new HttpError(401, 'Invalid API key');
+  if (accessProblem(co)) throw new HttpError(403, 'Account suspended');
   return co;
 }
 

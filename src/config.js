@@ -39,4 +39,11 @@ module.exports = {
   encryptionKey: env.ENCRYPTION_KEY,
   defaultCountryCode: (env.DEFAULT_COUNTRY_CODE || '91').replace(/\D/g, ''),
   schedulerEnabled: env.SCHEDULER_ENABLED !== 'false',
+  // false = only the platform owner creates companies (owner console at /owner.html).
+  allowSignup: env.ALLOW_SIGNUP !== 'false',
+  ownerTokenTtl: env.OWNER_TOKEN_TTL || '12h',
+  // Desktop installs: how long the app keeps working offline before it must re-check its licence.
+  offlineGraceDays: +env.OFFLINE_GRACE_DAYS || 7,
+  // Built desktop installers are served from here at /downloads.
+  downloadsDir: env.DOWNLOADS_DIR || require('path').join(__dirname, '..', 'downloads'),
 };

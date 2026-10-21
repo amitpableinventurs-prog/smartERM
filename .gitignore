@@ -1,2 +1,5 @@
 node_modules
 .env
+desktop/dist
+downloads/*.exe
+desktop/.cache

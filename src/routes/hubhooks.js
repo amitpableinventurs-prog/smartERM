@@ -16,6 +16,8 @@ const providers = require('../services/providers');
 const inbox = require('../services/inbox');
 const ivr = require('../services/ivr');
 const { HttpError } = require('../utils/helpers');
+const { accessProblem, hasModule } = require('../modules');
+const tenants = require('../services/tenants');
 
 const router = express.Router();
 router.use(express.urlencoded({ extended: false, limit: '1mb' }));
@@ -23,6 +25,8 @@ router.use(express.urlencoded({ extended: false, limit: '1mb' }));
 async function load(req, channels) {
   const p = await M.ChannelProvider.findOne({ webhookToken: String(req.params.token) }).select('+credentials');
   if (!p || (channels && !channels.includes(p.channel))) throw new HttpError(404, 'Unknown webhook');
+  const co = await tenants.getCompany(p.company);
+  if (accessProblem(co) || !hasModule(co, 'hub')) throw new HttpError(403, 'Account suspended or Communication Hub not enabled');
   const cfg = providers.unseal(p.credentials);
   // Twilio signs every request; verify it when we know our public URL.
   if (p.provider === 'twilio' && config.publicUrl && cfg.authToken && !providers.twilioSignatureOk(cfg.authToken, config.publicUrl + req.originalUrl, req.body, req.get('x-twilio-signature'))) {

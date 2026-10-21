@@ -30,7 +30,8 @@ async function waitFor(fn, ms = 8000) {
 }
 
 (async () => {
-  const mongod = await MongoMemoryServer.create();
+  // Windows can take well over the default 10 s to start mongod (antivirus scan), so allow 60 s.
+  const mongod = await MongoMemoryServer.create({ instance: { launchTimeout: 60e3 } });
   await mongoose.connect(mongod.getUri());
   const app = require('../src/app');
   const scheduler = require('../src/services/scheduler');
@@ -602,6 +603,132 @@ async function waitFor(fn, ms = 8000) {
     assert.equal((await call('GET', '/api/leads', null, other)).body.total, 0);
     assert.equal((await call('GET', '/api/hub/conversations?view=all', null, other)).body.total, 0);
     assert.equal((await call('GET', '/api/hub/broadcasts', null, other)).body.total, 0);
+  });
+
+  await test('owner console: create client with modules, gates, seats, suspend, login-as', async () => {
+    const bcrypt = require('bcryptjs');
+    const M = require('../src/models');
+    await M.Owner.create({ name: 'Boss', email: 'boss@platform.test', password: await bcrypt.hash('ownerpass1', 10) });
+    assert.equal((await call('POST', '/api/owner/login', { email: 'boss@platform.test', password: 'nope' })).status, 401);
+    const own = (await call('POST', '/api/owner/login', { email: 'boss@platform.test', password: 'ownerpass1' })).body.token;
+    assert(own);
+    assert.equal((await call('GET', '/api/owner/companies', null, admin)).status, 401); // company token is not an owner token
+    assert.equal((await call('GET', '/api/leads', null, own)).status, 401); // owner token is not a company token
+
+    const c = await call('POST', '/api/owner/companies', { companyName: 'HR Only Ltd', name: 'Hina', email: 'hina@hr.test', password: 'password123', modules: ['hr'], maxUsers: 2 }, own);
+    assert.equal(c.status, 201, JSON.stringify(c.body));
+    assert.match(c.body.activationKey, /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);
+    const login = await call('POST', '/api/auth/login', { email: 'hina@hr.test', password: 'password123' });
+    assert.deepEqual(login.body.workspace.modules, ['hr']);
+    const hina = login.body.accessToken;
+    assert.equal((await call('GET', '/api/leads', null, hina)).status, 403);
+    assert.equal((await call('GET', '/api/hub/overview', null, hina)).status, 403);
+    assert.equal((await call('GET', '/api/reports/funnel', null, hina)).status, 403);
+    assert.equal((await call('GET', '/api/reports/dashboard', null, hina)).status, 200);
+    assert.equal((await call('GET', '/api/hr/employees', null, hina)).status, 200);
+    assert.deepEqual((await call('GET', '/api/auth/me', null, hina)).body.workspace.modules, ['hr']);
+
+    // Seat limit of 2 active users.
+    assert.equal((await call('POST', '/api/users', { name: 'Two', email: 'two@hr.test', password: 'password123', role: 'hr_manager' }, hina)).status, 201);
+    assert.equal((await call('POST', '/api/users', { name: 'Three', email: 'three@hr.test', password: 'password123', role: 'hr_manager' }, hina)).status, 403);
+
+    // Owner adds CRM: takes effect on the next request.
+    assert.equal((await call('PATCH', `/api/owner/companies/${c.body.id}`, { modules: ['hr', 'crm'] }, own)).status, 200);
+    assert.equal((await call('GET', '/api/leads', null, hina)).status, 200);
+
+    // Suspend: API, login and the public form webhook all stop.
+    const coKey = (await call('GET', '/api/company', null, hina)).body.apiKey;
+    assert.equal((await call('PATCH', `/api/owner/companies/${c.body.id}`, { status: 'suspended', suspendReason: 'Payment due' }, own)).status, 200);
+    const blocked = await call('GET', '/api/leads', null, hina);
+    assert.equal(blocked.status, 403);
+    assert.match(blocked.body.error, /Payment due/);
+    assert.equal((await call('POST', '/api/auth/login', { email: 'hina@hr.test', password: 'password123' })).status, 403);
+    assert.equal((await call('POST', `/api/webhooks/form/${coKey}`, { name: 'X', email: 'x@x.test' })).status, 403);
+    assert.equal((await call('POST', `/api/owner/companies/${c.body.id}/login-as`, null, own)).status, 409);
+
+    // Expired licence behaves like suspension.
+    await call('PATCH', `/api/owner/companies/${c.body.id}`, { status: 'active', validUntil: '2020-01-01' }, own);
+    assert.equal((await call('GET', '/api/leads', null, hina)).status, 403);
+    await call('PATCH', `/api/owner/companies/${c.body.id}`, { validUntil: '' }, own);
+    assert.equal((await call('GET', '/api/leads', null, hina)).status, 200);
+
+    const as = await call('POST', `/api/owner/companies/${c.body.id}/login-as`, null, own);
+    assert.equal(as.status, 200);
+    assert.equal((await call('GET', '/api/hr/employees', null, as.body.accessToken)).status, 200);
+    const list = (await call('GET', '/api/owner/companies', null, own)).body;
+    assert.equal(list.find((x) => x.id === c.body.id).users, 2);
+    assert.equal((await call('GET', '/api/owner/overview', null, own)).body.companies, list.length);
+  });
+
+  await test('desktop activation: key, device limit, check-in, revoke, key rotation', async () => {
+    const own = (await call('POST', '/api/owner/login', { email: 'boss@platform.test', password: 'ownerpass1' })).body.token;
+    const c = (await call('POST', '/api/owner/companies', { companyName: 'Desk Co', name: 'Dev', email: 'dev@desk.test', password: 'password123', modules: ['crm'], maxDevices: 1 }, own)).body;
+    assert.equal((await call('POST', '/api/activate', { key: 'AAAA-BBBB-CCCC-DDDD', deviceId: 'pc-00000001' })).status, 404);
+    const act = await call('POST', '/api/activate', { key: c.activationKey.toLowerCase(), deviceId: 'pc-00000001', deviceName: 'Front desk' });
+    assert.equal(act.status, 201, JSON.stringify(act.body));
+    assert.deepEqual(act.body.company.modules, ['crm']);
+    assert.equal((await call('POST', '/api/activate', { key: c.activationKey, deviceId: 'pc-00000002' })).status, 403); // maxDevices 1
+    const check = (secret = act.body.deviceSecret) => call('POST', '/api/activate/check', { companyId: c.id, deviceId: 'pc-00000001', deviceSecret: secret }).then((r) => r.body.status);
+    assert.equal(await check(), 'ok');
+    assert.equal(await check('wrong'), 'unknown');
+
+    // Rotating the key keeps activated computers working but the old key stops activating new ones.
+    const rotated = (await call('POST', `/api/owner/companies/${c.id}/activation-key`, null, own)).body.activationKey;
+    assert.notEqual(rotated, c.activationKey);
+    assert.equal(await check(), 'ok');
+    assert.equal((await call('POST', '/api/activate', { key: c.activationKey, deviceId: 'pc-00000003' })).status, 404);
+
+    const detail = (await call('GET', `/api/owner/companies/${c.id}`, null, own)).body;
+    assert.equal(detail.deviceList.length, 1);
+    assert.equal(detail.deviceList[0].name, 'Front desk');
+    await call('PATCH', `/api/owner/devices/${detail.deviceList[0]._id}`, { revoked: true }, own);
+    assert.equal(await check(), 'revoked');
+    // A revoked computer cannot sign in either.
+    const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-Id': 'pc-00000001' }, body: JSON.stringify({ email: 'dev@desk.test', password: 'password123' }) });
+    assert.equal(r.status, 403);
+    await call('PATCH', `/api/owner/companies/${c.id}`, { status: 'suspended' }, own);
+    await call('PATCH', `/api/owner/devices/${detail.deviceList[0]._id}`, { revoked: false }, own);
+    assert.equal(await check(), 'blocked');
+  });
+
+  await test('custom domains: DNS records, verification, branding and login restricted to the tenant', async () => {
+    const http = require('http');
+    const M = require('../src/models');
+    // Node fetch cannot set Host, so use http.request for host-based checks.
+    const hostCall = (method, path, host, body) => new Promise((resolve, reject) => {
+      const data = body ? JSON.stringify(body) : undefined;
+      const req = http.request(base + path, { method, headers: { Host: host, ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}) } }, (res) => {
+        let t = ''; res.on('data', (d) => { t += d; }); res.on('end', () => resolve({ status: res.statusCode, body: t ? JSON.parse(t) : null }));
+      });
+      req.on('error', reject); req.end(data);
+    });
+    const own = (await call('POST', '/api/owner/login', { email: 'boss@platform.test', password: 'ownerpass1' })).body.token;
+    const c = (await call('POST', '/api/owner/companies', { companyName: 'Domain Co', name: 'Dee', email: 'dee@dom.test', password: 'password123', branding: { appName: 'Dee CRM' } }, own)).body;
+    assert.equal((await call('POST', `/api/owner/companies/${c.id}/domains`, { host: 'not a domain' }, own)).status, 400);
+    const d = await call('POST', `/api/owner/companies/${c.id}/domains`, { host: 'https://CRM.Dee-Client.test/login' }, own);
+    assert.equal(d.status, 201);
+    assert.equal(d.body.host, 'crm.dee-client.test');
+    assert.deepEqual(d.body.records.map((x) => x.type), ['CNAME', 'TXT']);
+    assert.equal((await call('POST', `/api/owner/companies/${c.id}/domains`, { host: 'crm.dee-client.test' }, own)).status, 201); // idempotent
+    const other = (await call('POST', '/api/owner/companies', { companyName: 'Other Dom', name: 'Ola', email: 'ola@dom.test', password: 'password123' }, own)).body;
+    assert.equal((await call('POST', `/api/owner/companies/${other.id}/domains`, { host: 'crm.dee-client.test' }, own)).status, 409);
+    // No TXT record exists for a .test domain, so verification fails.
+    assert.equal((await call('POST', `/api/owner/companies/${c.id}/domains/crm.dee-client.test/verify`, null, own)).status, 400);
+    assert.equal((await call('GET', '/api/domains/allowed?domain=crm.dee-client.test')).status, 404);
+
+    // Simulate a passed DNS check.
+    await M.Company.updateOne({ _id: c.id, 'domains.host': 'crm.dee-client.test' }, { $set: { 'domains.$.verified': true } });
+    require('../src/services/tenants').invalidate(c.id);
+    assert.equal((await call('GET', '/api/domains/allowed?domain=crm.dee-client.test')).status, 200);
+    const t = await hostCall('GET', '/api/tenant', 'crm.dee-client.test');
+    assert.equal(t.body.tenant.branding.appName, 'Dee CRM');
+    assert.equal(t.body.signup, false);
+    assert.equal((await hostCall('POST', '/api/auth/register', 'crm.dee-client.test', { companyName: 'Sneaky', name: 'Sam', email: 'sam@x.test', password: 'password123' })).status, 403);
+    assert.equal((await hostCall('POST', '/api/auth/login', 'crm.dee-client.test', { email: 'dee@dom.test', password: 'password123' })).status, 200);
+    assert.equal((await hostCall('POST', '/api/auth/login', 'crm.dee-client.test', { email: 'ann@acme.test', password: 'password123' })).status, 401);
+    assert.equal((await call('GET', '/api/tenant')).body.tenant, null);
+    assert.equal((await call('DELETE', `/api/owner/companies/${c.id}/domains/crm.dee-client.test`, null, own)).status, 204);
+    assert.equal((await call('GET', '/api/domains/allowed?domain=crm.dee-client.test')).status, 404);
   });
 
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

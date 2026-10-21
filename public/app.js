@@ -84,25 +84,39 @@ function toast(msg, err) {
 const S = { user: JSON.parse(localStorage.getItem('crm_user') || 'null'), access: localStorage.getItem('crm_at'), refresh: localStorage.getItem('crm_rt') };
 function saveSession(r) {
   if (r.user) S.user = r.user;
+  if (r.workspace) S.user = { ...S.user, workspace: r.workspace }; // company name, licensed modules, branding
   S.access = r.accessToken; S.refresh = r.refreshToken;
   localStorage.setItem('crm_user', JSON.stringify(S.user));
   localStorage.setItem('crm_at', S.access); localStorage.setItem('crm_rt', S.refresh);
 }
-function clearSession() { S.user = S.access = S.refresh = null; localStorage.clear(); }
+function clearSession() { S.user = S.access = S.refresh = null; S.meChecked = false; localStorage.clear(); }
 
+// In the Windows desktop app the panels are local files and the API is the central server (desktop/preload.js).
+const DESK = window.CRM_CONFIG || {};
 async function raw(path, opt = {}) {
-  const headers = { ...(opt.body && !opt.csv ? { 'Content-Type': 'application/json' } : {}), ...(opt.csv ? { 'Content-Type': 'text/csv' } : {}), ...(S.access ? { Authorization: 'Bearer ' + S.access } : {}) };
-  return fetch('/api' + path, { method: opt.method || 'GET', headers, body: opt.csv ? opt.body : opt.body ? JSON.stringify(opt.body) : undefined });
+  const headers = { ...(opt.body && !opt.csv ? { 'Content-Type': 'application/json' } : {}), ...(opt.csv ? { 'Content-Type': 'text/csv' } : {}), ...(S.access ? { Authorization: 'Bearer ' + S.access } : {}), ...(DESK.deviceId ? { 'X-Device-Id': DESK.deviceId } : {}) };
+  return fetch((DESK.apiBase || '') + '/api' + path, { method: opt.method || 'GET', headers, body: opt.csv ? opt.body : opt.body ? JSON.stringify(opt.body) : undefined });
 }
 async function api(path, opt = {}) {
-  let res = await raw(path, opt);
+  let res;
+  try { res = await raw(path, opt); } catch (e) {
+    // Server unreachable: serve saved data / queue the change (offline.js).
+    if (opt.noOffline) throw Object.assign(e, { offline: true });
+    return Offline.fallback(path, opt);
+  }
+  Offline.setOffline(false);
   if (res.status === 401 && S.refresh && !path.startsWith('/auth/')) {
     const r = await raw('/auth/refresh', { method: 'POST', body: { refreshToken: S.refresh } });
-    if (r.ok) { saveSession(await r.json()); res = await raw(path, opt); } else { clearSession(); render(); throw new Error('Session expired'); }
+    if (r.ok) { saveSession(await r.json()); res = await raw(path, opt); } else { clearSession(); render(); throw new Error(r.status === 403 ? (await r.json()).error : 'Session expired'); }
   }
   const text = await res.text();
   let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  if (!res.ok) {
+    // Company suspended or licence expired: back to the sign-in screen with the reason.
+    if (res.status === 403 && data?.details?.code === 'company_blocked' && S.access) { clearSession(); render(); }
+    throw Object.assign(new Error((data && data.error) || res.statusText), { status: res.status });
+  }
+  if ((opt.method || 'GET') === 'GET') Offline.remember(path, data);
   return data;
 }
 const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
@@ -971,6 +985,18 @@ const MENU = {
   sales: ['dashboard', 'inbox', 'leads', 'customers', 'deals', 'tasks', 'communications', 'reports', 'ai', 'myspace', 'notifications'],
   support: ['dashboard', 'inbox', 'customers', 'tasks', 'communications', 'calllogs', 'leads', 'ai', 'myspace', 'notifications'],
 };
+// Licensed modules a page needs (any one of them). Mirrors the module gates in src/app.js. Unlisted pages are always on.
+const PAGE_NEEDS = {
+  dashboard: ['crm'], leads: ['crm', 'hub', 'ads'], customers: ['crm', 'hub'], tasks: ['crm', 'hub'], communications: ['crm', 'hub'], templates: ['crm', 'hub'],
+  deals: ['crm'], campaigns: ['crm'], workflows: ['crm'], pipelines: ['crm'], reports: ['reports'], ai: ['ai'], myspace: ['hr'],
+  ...Object.fromEntries(HUB.map((p) => [p, ['hub']])), ...Object.fromEntries(ADS.map((p) => [p, ['ads']])), ...Object.fromEntries(HRP.map((p) => [p, ['hr']])),
+};
+const licensed = (page) => { const mods = S.user?.workspace?.modules; return !mods || !PAGE_NEEDS[page] || PAGE_NEEDS[page].some((m) => mods.includes(m)); };
+const brandName = () => S.user?.workspace?.branding?.appName || 'Smart CRM';
+function applyBranding(color) {
+  if (/^#[0-9a-f]{6}$/i.test(color || '')) document.documentElement.style.setProperty('--brand', color);
+  else document.documentElement.style.removeProperty('--brand');
+}
 const GROUPS = [['Overview', ['dashboard']], ['Sales', ['leads', 'customers', 'deals', 'tasks']], ['Engage', ['communications', 'templates', 'campaigns', 'workflows']], ['Insights', ['reports', 'ai']], ['Communication Hub', HUB], ['Advertising', ADS], ['People & Payroll', HRP], ['Me', ['myspace']], ['Admin', ['pipelines', 'users', 'audit', 'company']], ['', ['notifications']]];
 const SUBS = {
   dashboard: 'Your business at a glance', leads: 'Capture, score and move prospects through the pipeline', customers: 'Profiles, purchases and relationship health',
@@ -997,28 +1023,37 @@ const BULLETS = [['zap', 'Automate follow-ups with a visual-style workflow engin
 
 function loginScreen() {
   let mode = 'login';
+  // A client's own domain or desktop install shows the client's name and hides sign-up and demo logins.
+  let site = DESK.company ? { tenant: DESK.company, signup: false } : { tenant: null, signup: true };
   const inner = h('div', { class: 'inner' });
+  const artBrand = h('span', {}, 'Smart CRM');
+  const siteName = () => site.tenant && (site.tenant.branding?.appName || site.tenant.name);
   async function submit(body) {
     const r = await api('/auth/' + mode, { method: 'POST', body });
     saveSession(r); render();
   }
   const draw = () => {
+    const open = site.signup && !site.tenant;
+    if (!open) mode = 'login';
+    artBrand.textContent = siteName() || 'Smart CRM';
+    applyBranding(site.tenant?.branding?.color);
     const fields = mode === 'login'
       ? [{ k: 'email', req: true, label: 'Email' }, { k: 'password', type: 'password', req: true, label: 'Password' }]
       : [{ k: 'companyName', req: true, label: 'Company name' }, { k: 'name', req: true, label: 'Your name' }, { k: 'email', req: true, label: 'Email' }, { k: 'password', type: 'password', req: true, label: 'Password (min 8 characters)' }];
     const f = form(fields);
     const fm = h('form', { onsubmit: guard(async (e) => { e.preventDefault(); await submit(f.values()); }) }, f, h('button', { class: 'btn', type: 'submit' }, mode === 'login' ? 'Sign in' : 'Create account'));
     setKids(inner, 
-      h('h2', {}, mode === 'login' ? 'Welcome back' : 'Create your workspace'),
+      h('h2', {}, mode === 'login' ? (siteName() ? `Sign in to ${siteName()}` : 'Welcome back') : 'Create your workspace'),
       h('p', { class: 'muted', style: 'margin:0 0 6px' }, mode === 'login' ? 'Sign in to your CRM panel' : 'You will be the Super Admin'),
       fm,
-      h('div', { class: 'switch' }, mode === 'login' ? 'New company? ' : 'Already have an account? ', h('a', { onclick: () => { mode = mode === 'login' ? 'register' : 'login'; draw(); } }, mode === 'login' ? 'Create account' : 'Sign in')),
-      mode === 'login' && h('div', { class: 'demo' }, h('p', {}, 'Demo accounts (password Demo@1234) — click to sign in:'),
+      open && h('div', { class: 'switch' }, mode === 'login' ? 'New company? ' : 'Already have an account? ', h('a', { onclick: () => { mode = mode === 'login' ? 'register' : 'login'; draw(); } }, mode === 'login' ? 'Create account' : 'Sign in')),
+      open && mode === 'login' && h('div', { class: 'demo' }, h('p', {}, 'Demo accounts (password Demo@1234) — click to sign in:'),
         h('div', { class: 'row' }, DEMO.map(([email, role, sub]) => h('button', { type: 'button', onclick: guard(() => submit({ email, password: 'Demo@1234' })) }, avatar(role, 'sm'), h('span', {}, h('b', {}, role), h('small', {}, sub)))))));
   };
   draw();
+  if (!DESK.company) api('/tenant').then((t) => { site = t; draw(); }).catch(() => {});
   return h('div', { class: 'auth' },
-    h('div', { class: 'art' }, h('div', { class: 'brand', style: 'position:relative;margin-bottom:28px' }, h('div', { class: 'logo' }, icon('zap')), 'Smart CRM'),
+    h('div', { class: 'art' }, h('div', { class: 'brand', style: 'position:relative;margin-bottom:28px' }, h('div', { class: 'logo' }, icon('zap')), artBrand),
       h('h1', {}, 'Sell smarter.', h('br'), 'Automate the rest.'), h('p', {}, 'Leads, customers, deals and campaigns — with automation and AI built in.'),
       h('ul', {}, BULLETS.map(([ic, t]) => h('li', {}, h('span', {}, icon(ic)), t)))),
     h('div', { class: 'box' }, inner));
@@ -1028,8 +1063,21 @@ function route() { return (location.hash.replace(/^#\//, '').split('?')[0]) || '
 
 async function render() {
   const app = $('#app');
-  if (!S.access || !S.user) { setKids(app, loginScreen()); return; }
-  const menu = MENU[S.user.role] || MENU.support;
+  if (!S.access || !S.user) { applyBranding(); setKids(app, loginScreen()); return; }
+  // Pick up module/branding changes made by the platform owner since this session started.
+  if (!S.meChecked) {
+    S.meChecked = true;
+    api('/auth/me').then((me) => {
+      const before = JSON.stringify(S.user.workspace);
+      S.user = { ...S.user, ...me };
+      localStorage.setItem('crm_user', JSON.stringify(S.user));
+      if (JSON.stringify(me.workspace) !== before) render();
+    }).catch(() => {});
+  }
+  const ws = S.user.workspace || {};
+  applyBranding(ws.branding?.color);
+  document.title = ws.name ? `${ws.name} · ${brandName()}` : brandName();
+  const menu = (MENU[S.user.role] || MENU.support).filter(licensed);
   let page = route();
   if (!menu.includes(page)) page = menu[0];
   const bell = h('a', { class: 'iconbtn', href: '#/notifications', title: 'Notifications' }, icon('notifications'));
@@ -1037,7 +1085,13 @@ async function render() {
   const main = h('div', { class: 'main' });
   main.append(
     h('div', { class: 'top' }, h('div', { class: 'ttl' }, h('h2', {}, MODULES[page].title), h('p', {}, SUBS[page] || '')), bell,
-      h('button', { class: 'btn sec', onclick: guard(async () => { await api('/auth/logout', { method: 'POST', body: { refreshToken: S.refresh } }).catch(() => {}); clearSession(); render(); }) }, 'Sign out')));
+      h('button', { class: 'btn sec', onclick: guard(async () => {
+        const waiting = await Offline.pendingCount();
+        if (waiting && !confirm(`${waiting} change(s) made offline have not synced yet and will be lost. Sign out anyway?`)) return;
+        await api('/auth/logout', { method: 'POST', body: { refreshToken: S.refresh }, noOffline: true }).catch(() => {});
+        await Offline.clearUser(S.user.id);
+        clearSession(); render();
+      }) }, 'Sign out')));
   const body = h('div', {});
   main.append(body);
 
@@ -1051,7 +1105,7 @@ async function render() {
   nav.append(h('div', { class: 'grp' }, 'Inbox'), h('a', { class: page === 'notifications' ? 'on' : '', href: '#/notifications' }, icon('notifications'), 'Notifications', badge));
 
   setKids(app, h('div', { class: 'shell' },
-    h('aside', { class: 'side' }, h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('zap')), 'Smart CRM'), h('div', { class: 'rolechip' }, PANEL[S.user.role]), nav,
+    h('aside', { class: 'side' }, h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('zap')), brandName()), h('div', { class: 'rolechip' }, PANEL[S.user.role]), ws.name && h('div', { class: 'coname' }, ws.name), nav,
       h('div', { class: 'me' }, avatar(S.user.name, 'lg'), h('div', {}, h('b', {}, S.user.name), h('span', {}, S.user.email)))), main));
 
   api('/notifications?unread=true').then((r) => { if (r.unread) { badge.textContent = r.unread; badge.hidden = false; bell.append(h('span', { class: 'dot' }, r.unread)); } }).catch(() => {});

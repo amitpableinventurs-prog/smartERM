@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { User } = require('../models');
 const { HttpError } = require('../utils/helpers');
+const { MODULES, hasModule, accessProblem } = require('../modules');
+const tenants = require('../services/tenants');
 
 // c=create r=read u=update d=delete. '*' = everything.
 const ACL = {
@@ -56,12 +58,23 @@ async function authenticate(req, _res, next) {
   } catch {
     throw new HttpError(401, 'Invalid or expired token');
   }
+  if (payload.aud === 'owner') throw new HttpError(401, 'Owner tokens only work on /api/owner');
   const user = await User.findById(payload.sub);
   if (!user || !user.active) throw new HttpError(401, 'User not found or disabled');
+  const company = await tenants.getCompany(user.company);
+  const problem = accessProblem(company);
+  if (problem) throw new HttpError(403, problem, { code: 'company_blocked' });
   req.user = user;
   req.companyId = user.company;
+  req.company = company;
   next();
 }
+
+// Blocks a route unless the company's licence includes one of the given modules.
+const requireModule = (...keys) => (req, _res, next) => {
+  if (!keys.some((k) => hasModule(req.company, k))) throw new HttpError(403, `Your plan does not include ${MODULES[keys[0]].label}`, { code: 'module_disabled' });
+  next();
+};
 
 function allowed(role, resource, action) {
   const acl = ACL[role];
@@ -79,4 +92,4 @@ function scopeFilter(req, resource) {
   return OWN_ONLY[req.user.role]?.includes(resource) ? { assignedTo: req.user._id } : {};
 }
 
-module.exports = { authenticate, authorize, scopeFilter, signAccess, signRefresh, allowed };
+module.exports = { authenticate, authorize, requireModule, scopeFilter, signAccess, signRefresh, allowed };

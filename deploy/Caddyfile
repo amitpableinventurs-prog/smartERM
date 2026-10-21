@@ -1,0 +1,24 @@
+# Caddy in front of the Node server: automatic HTTPS for your main address and for every client domain
+# that has been verified in the owner console. Install Caddy (https://caddyserver.com), copy this file to
+# /etc/caddy/Caddyfile, replace crm.example.com and you@example.com, then `systemctl reload caddy`.
+
+{
+	email you@example.com
+	# Before issuing a certificate for an unknown hostname, Caddy asks the CRM whether it is a verified client domain.
+	on_demand_tls {
+		ask http://127.0.0.1:5000/api/domains/allowed
+	}
+}
+
+# Your main address (PUBLIC_URL=https://crm.example.com in .env).
+crm.example.com {
+	reverse_proxy 127.0.0.1:5000
+}
+
+# Client domains (crm.client.com CNAME -> crm.example.com).
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:5000
+}

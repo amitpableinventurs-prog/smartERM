@@ -21,6 +21,56 @@ Email is logged as `simulated` until SMTP is set. SMS, WhatsApp and voice use th
 
 Open `http://localhost:5000/` after `npm start`. Register a company (you become Super Admin), then create users under Team & Users. Each role signs in to its own panel with its own menu (Super Admin/Admin, Manager, Sales, Support).
 
+## Owner console, licensing, desktop app and client domains
+
+You (the platform owner) sit above every company. Data for all clients stays in this server's one database.
+
+**Owner console** at `/owner.html`. Create the first owner with `npm run owner:create -- you@example.com "StrongPass123" "Your Name"` (`npm run seed` also creates `owner@demo.com` / `Demo@1234`). From the console you can:
+
+- create a client company together with its super admin login;
+- choose its modules: `crm`, `hub`, `ads`, `hr`, `ai`, `reports`. The dashboard, users, company settings, audit log and notifications are always on;
+- set an expiry date, a maximum number of active users and a maximum number of desktop computers;
+- set the app name and colour that client sees;
+- suspend or reactivate the company, which takes effect within seconds;
+- open the client's panel as their super admin. This is recorded in the client's audit log.
+
+| What the licence controls | Where it is enforced |
+|---|---|
+| Modules | Module gates in `src/app.js` return 403 for API routes outside the plan. Panel menus hide those pages. |
+| Suspended / expired | Every API call, login and token refresh is refused. Public form, SMS and WhatsApp webhooks are refused. Automation stops, and running broadcasts and drip campaigns are paused. |
+| Max users / computers | Creating or reactivating a user beyond the limit fails, and so does activating one computer too many. |
+
+Set `ALLOW_SIGNUP=false` to switch off public company sign-up, so that only you create companies.
+
+**Windows desktop app** (`desktop/`, Electron). One installer serves every client:
+
+1. Build it with `SERVER_URL=https://crm.example.com npm run desktop:build`, or in PowerShell `$env:SERVER_URL="https://crm.example.com"; npm run desktop:build`. The installer is written to `downloads/SmartCRM-Setup-<version>.exe`, the server offers it at `/downloads/...`, and the owner console links to it. The installer adds a desktop shortcut and a Start-menu shortcut. Without `SERVER_URL` the app asks for the server address on first start.
+2. Send the client the installer and their **activation key**, which you find in the owner console under the client's *Desktop app* section.
+3. On first start the app asks for the key. It registers the computer (shown under *Activated computers*), and from then on it shows only that client's modules.
+4. The app checks its licence at every start and every 30 minutes. Revoking a computer or suspending the company locks the app. Without internet the app keeps working for `OFFLINE_GRACE_DAYS` (7 by default) since its last successful check. Issuing a new key does not affect computers that are already activated.
+
+`npm run desktop:dev` runs the app without building an installer. The build downloads about 300 MB of tools. If drive C is short of space, point the caches elsewhere first, for example in PowerShell: `$env:npm_config_cache="D:\cache\npm"; $env:ELECTRON_CACHE="D:\cache\electron"; $env:ELECTRON_BUILDER_CACHE="D:\cache\electron-builder"`. The installer is not code-signed, so Windows SmartScreen shows "unknown publisher" until you sign it with a code-signing certificate (electron-builder `win.certificateFile`).
+
+**Offline mode** (`public/offline.js`, used by the desktop app and the browser):
+
+- Pages opened before keep showing their last data when the server cannot be reached.
+- While offline, these changes are queued on the computer: creating or editing leads, customers, deals and tasks, adding notes to leads, completing tasks, and logging communications. They sync in order when the connection returns, and records created offline get their real ids.
+- If the server refuses a queued change (for example a duplicate or a permission problem), it is kept for review. The pill in the bottom-left corner shows "could not sync"; click it to see these changes.
+- Everything else needs a connection: sending messages, bulk sends, AI, payroll and so on.
+
+**Client domains.** In the owner console, add a domain such as `crm.client.com` to a company. The client then creates two DNS records:
+
+- a `CNAME` from `crm.client.com` to your server's host (taken from `PUBLIC_URL`);
+- a `TXT` record at `_smartcrm-verify.crm.client.com` with the token the console shows.
+
+When both records are in place, press **Verify**. On a verified domain:
+
+- the sign-in page shows the client's name;
+- sign-up is hidden;
+- only that client's users can sign in.
+
+For HTTPS on these domains, put Caddy in front of the server using `deploy/Caddyfile`. Caddy asks `GET /api/domains/allowed?domain=` before it issues a certificate, so only verified domains get one.
+
 ## Roles
 
 `super_admin` > `admin` > `manager` > `ads_manager` (advertising only) / `hr_manager` / `comm_manager` (Communication Hub) / `sales` (own leads/deals/tasks/customers/chats only) > `support` / `telecaller` (inbox and own leads). See `ACL` in `src/middleware/auth.js`.
@@ -43,6 +93,9 @@ Open `http://localhost:5000/` after `npm start`. Register a company (you become 
 | Admin | `/api/users`, `/api/company` (+`rotate-api-key`), `/api/audit-logs`, `/api/notifications`, `/api/webhook-subscriptions` (outbound, HMAC-signed) |
 | Communication Hub | `/api/hub/*`: `overview`, `providers`, `bot` (+ `bot/test`), `broadcasts` (+ `recipients/csv` `recipients/crm` `launch` `pause` `resume` `cancel` `report`), `conversations` (+ `reply` `takeover` `release` `assign` `close` `suggest`), `ivr/flows`, `ivr/calls`, `ivr/call`, `ivr/simulate`, `optouts` |
 | Provider webhooks | `/api/webhooks/comm/:token/sms` `whatsapp` `status` `voice` `voice/step` `voice/status` (full URLs on the Providers page) |
+| Owner (aud=owner token) | `POST /api/owner/login`; `GET /overview` `/modules` `/installer`; `GET/POST /companies`, `GET/PATCH /companies/:id`; `POST /companies/:id/activation-key` `login-as` `domains` `domains/:host/verify`; `DELETE /companies/:id/domains/:host`; `PATCH/DELETE /devices/:id` |
+| Desktop licence | `POST /api/activate` (key → device secret), `POST /api/activate/check` |
+| Public tenant | `GET /api/tenant` (branding for the requesting domain), `GET /api/domains/allowed?domain=` (Caddy on-demand TLS) |
 | Public inbound | `POST /api/webhooks/form/:apiKey` (web form → lead), `/activity/:apiKey`; `POST /api/webhooks/whatsapp` and `/email` (header `x-webhook-secret`, body `{apiKey, from, body}`) |
 
 ## Automation

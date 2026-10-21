@@ -1,0 +1,51 @@
+{
+  "name": "smartcrm-desktop",
+  "version": "1.0.0",
+  "description": "Smart CRM for Windows",
+  "main": "main.js",
+  "private": true,
+  "author": "Smart CRM",
+  "scripts": {
+    "start": "electron .",
+    "dist": "node scripts/prebuild.js && electron-builder --win nsis --x64 && node scripts/copy-installer.js"
+  },
+  "build": {
+    "appId": "com.smartcrm.desktop",
+    "productName": "Smart CRM",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app-config.json",
+      "ui/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../public",
+        "to": "public",
+        "filter": [
+          "**/*",
+          "!owner.*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Smart CRM",
+      "artifactName": "SmartCRM-Setup-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.9.0",
+    "electron-builder": "^26.15.3"
+  }
+}

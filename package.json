@@ -8,7 +8,10 @@
     "dev": "node --watch src/server.js",
     "test": "node scripts/smoke-test.js",
     "seed": "node scripts/seed.js",
-    "seed:hub": "node scripts/seed-hub-only.js"
+    "seed:hub": "node scripts/seed-hub-only.js",
+    "owner:create": "node scripts/create-owner.js",
+    "desktop:dev": "npm --prefix desktop start",
+    "desktop:build": "npm --prefix desktop install && npm --prefix desktop run dist"
   },
   "keywords": [],
   "author": "",

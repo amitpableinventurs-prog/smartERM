@@ -10,6 +10,7 @@ if (config.jwt.accessSecret.startsWith('dev-') && process.env.NODE_ENV === 'prod
 
 mongoose
   .connect(config.mongoUri)
+  .then(() => require('./services/tenants').backfill())
   .then(() => {
     const server = app.listen(config.port, () => console.log(`Smart CRM API on http://localhost:${config.port}`));
     if (config.schedulerEnabled) scheduler.start();

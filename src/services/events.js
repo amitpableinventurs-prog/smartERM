@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const { Activity, Notification, Webhook } = require('../models');
+const { accessProblem } = require('../modules');
+const tenants = require('./tenants');
 
 const logActivity = (company, entity, type, message, meta, by) =>
   Activity.create({ company, entity, type, message, meta, by }).catch(() => {});
@@ -27,8 +29,10 @@ async function pushOutboundWebhooks(company, event, payload) {
 }
 
 // Fire-and-forget: feeds the automation engine and outbound webhooks. Never throws into the request path.
-function emit(company, event, entity, payload = {}) {
+async function emit(company, event, entity, payload = {}) {
   const automation = require('./automation'); // lazy: automation depends on this module
+  // Suspended/expired companies: no automation and no outbound webhooks (scheduler events still fire for them).
+  if (accessProblem(await tenants.getCompany(company).catch(() => null))) return;
   return Promise.allSettled([
     automation.trigger(company, event, entity, payload),
     pushOutboundWebhooks(company, event, { entity, ...payload }),

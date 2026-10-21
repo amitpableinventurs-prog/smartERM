@@ -4,10 +4,12 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { z } = require('zod');
 const config = require('../config');
-const { Company, User, Pipeline } = require('../models');
+const { User, Device } = require('../models');
 const { validate } = require('../middleware/common');
 const { authenticate, signAccess, signRefresh } = require('../middleware/auth');
 const { HttpError } = require('../utils/helpers');
+const { accessProblem } = require('../modules');
+const tenants = require('../services/tenants');
 
 const router = express.Router();
 const hash = (t) => crypto.createHash('sha256').update(t).digest('hex');
@@ -24,19 +26,26 @@ const publicUser = (u) => ({ id: u._id, name: u.name, email: u.email, role: u.ro
 
 const passwordRule = z.string().min(8).max(128);
 
+// Stops sign-in for suspended/expired companies and for desktop installs the owner revoked.
+async function assertCanSignIn(req, user) {
+  const co = await tenants.getCompany(user.company);
+  const problem = accessProblem(co);
+  if (problem) throw new HttpError(403, problem, { code: 'company_blocked' });
+  const deviceId = req.get('x-device-id');
+  if (deviceId && (await Device.exists({ company: user.company, deviceId, revoked: true }))) {
+    throw new HttpError(403, 'This computer has been deactivated. Contact your provider.', { code: 'device_revoked' });
+  }
+  return co;
+}
+
 router.post(
   '/register',
   validate(z.object({ companyName: z.string().min(2), name: z.string().min(2), email: z.string().email(), password: passwordRule })),
   async (req, res) => {
-    const { companyName, name, email, password } = req.body;
-    if (await User.exists({ email: email.toLowerCase() })) throw new HttpError(409, 'Email already registered');
-    const company = await Company.create({ name: companyName });
-    await Pipeline.create({
-      company: company._id, name: 'Default Sales Pipeline', isDefault: true,
-      stages: ['new', 'contacted', 'qualified', 'proposal_sent', 'negotiation', 'won', 'lost'],
-    });
-    const user = await User.create({ company: company._id, name, email, password: await bcrypt.hash(password, 10), role: 'super_admin' });
-    res.status(201).json({ user: publicUser(user), company: { id: company._id, name: company.name, apiKey: company.apiKey }, ...(await issue(user)) });
+    // With ALLOW_SIGNUP=false only the platform owner creates companies (owner console).
+    if (!config.allowSignup || (await tenants.tenantForHost(req.hostname))) throw new HttpError(403, 'Sign-up is disabled. Contact your provider for an account.');
+    const { company, user } = await tenants.createCompany(req.body);
+    res.status(201).json({ user: publicUser(user), workspace: tenants.workspace(company), company: { id: company._id, name: company.name, apiKey: company.apiKey }, ...(await issue(user)) });
   }
 );
 
@@ -44,7 +53,11 @@ router.post('/login', validate(z.object({ email: z.string().email(), password: z
   const user = await User.findOne({ email: req.body.email.toLowerCase() }).select('+password');
   // Same message for unknown user and wrong password.
   if (!user || !user.active || !(await bcrypt.compare(req.body.password, user.password))) throw new HttpError(401, 'Invalid credentials');
-  res.json({ user: publicUser(user), ...(await issue(user)) });
+  // On a client's own domain only that client's users can sign in.
+  const tenant = await tenants.tenantForHost(req.hostname);
+  if (tenant && String(tenant._id) !== String(user.company)) throw new HttpError(401, 'Invalid credentials');
+  const co = await assertCanSignIn(req, user);
+  res.json({ user: publicUser(user), workspace: tenants.workspace(co), ...(await issue(user)) });
 });
 
 // Refresh-token rotation: each token works once; reuse of an old one is rejected.
@@ -54,6 +67,7 @@ router.post('/refresh', validate(z.object({ refreshToken: z.string() })), async 
   const h = hash(req.body.refreshToken);
   const user = await User.findOneAndUpdate({ _id: payload.sub, active: true, refreshTokens: h }, { $pull: { refreshTokens: h } }, { returnDocument: 'after' });
   if (!user) throw new HttpError(401, 'Refresh token revoked');
+  await assertCanSignIn(req, user);
   res.json(await issue(user));
 });
 
@@ -62,7 +76,7 @@ router.post('/logout', validate(z.object({ refreshToken: z.string() })), async (
   res.status(204).end();
 });
 
-router.get('/me', authenticate, (req, res) => res.json(publicUser(req.user)));
+router.get('/me', authenticate, (req, res) => res.json({ ...publicUser(req.user), workspace: tenants.workspace(req.company) }));
 
 router.post('/change-password', authenticate, validate(z.object({ currentPassword: z.string(), newPassword: passwordRule })), async (req, res) => {
   const user = await User.findById(req.user._id).select('+password');
@@ -74,3 +88,4 @@ router.post('/change-password', authenticate, validate(z.object({ currentPasswor
 });
 
 module.exports = router;
+module.exports.issue = issue;

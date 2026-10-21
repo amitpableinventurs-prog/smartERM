@@ -24,6 +24,8 @@ const { send, addressFor } = require('./communication');
 const ai = require('./ai');
 const { notify, logActivity } = require('./events');
 const { render, addDays } = require('../utils/helpers');
+const { accessProblem } = require('../modules');
+const tenants = require('./tenants');
 
 const MODELS = { Lead: M.Lead, Customer: M.Customer, Deal: M.Deal, Task: M.Task };
 const MAX_STEPS_PER_RUN = 200;
@@ -250,6 +252,11 @@ async function runActions(company, entityRef, steps = [], payload = {}) {
 async function resumeDue() {
   const due = await M.WorkflowRun.find({ status: 'waiting', resumeAt: { $lte: new Date() } }).limit(100);
   for (const run of due) {
+    // Suspended/expired company: check again in an hour instead of sending.
+    if (accessProblem(await tenants.getCompany(run.company))) {
+      await M.WorkflowRun.updateOne({ _id: run._id, status: 'waiting' }, { resumeAt: new Date(Date.now() + 36e5) });
+      continue;
+    }
     // Claim atomically so overlapping scheduler ticks don't double-run.
     const claimed = await M.WorkflowRun.findOneAndUpdate({ _id: run._id, status: 'waiting' }, { status: 'running' }, { returnDocument: 'after' });
     if (claimed) await execute(claimed);

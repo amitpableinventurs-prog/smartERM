@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>Activate Smart CRM</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="auth">
+    <div class="art">
+      <div class="brand" style="position:relative;margin-bottom:28px"><span id="brand">Smart CRM</span></div>
+      <h1>Your CRM,<br>on this computer.</h1>
+      <p>Works when the internet drops: changes are saved here and sync to your company's server when you are back online.</p>
+    </div>
+    <div class="box">
+      <div class="inner">
+        <div id="blocked" hidden>
+          <h2>App is locked</h2>
+          <div class="warnbar" id="reason" style="margin-top:12px"></div>
+          <button class="btn" id="retry" type="button">Try again</button>
+          <div class="switch"><a id="rekey">Use a different activation key</a></div>
+        </div>
+        <form id="form">
+          <h2>Activate this computer</h2>
+          <p class="muted" style="margin:0 0 6px">Enter the activation key from your provider. You only need to do this once.</p>
+          <label for="key">Activation key</label>
+          <input id="key" required placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" style="text-transform:uppercase;letter-spacing:.08em">
+          <details id="adv" style="margin-top:12px">
+            <summary class="muted" style="cursor:pointer">Server address</summary>
+            <label for="server">Server address</label>
+            <input id="server" placeholder="https://crm.example.com">
+          </details>
+          <div class="warnbar" id="err" hidden style="margin-top:14px"></div>
+          <button class="btn" id="go" type="submit">Activate</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <script src="activate.js"></script>
+</body>
+</html>

@@ -283,7 +283,10 @@ const slug = (n) => n.toLowerCase().replace(/[^a-z]+/g, '.');
   await M.Notification.create({ company: co, user: s1._id, title: 'Task overdue', body: 'Call Rohan Gupta about quotation' });
   await M.Notification.create({ company: co, user: manager._id, title: 'Hot lead', body: 'Neha Verma scored above 70' });
 
+  // Platform owner console (/owner.html): manages every company.
+  await M.Owner.updateOne({ email: 'owner@demo.com' }, { name: 'Platform Owner', password: pw, active: true }, { upsert: true });
   console.log('Demo data ready. Sign in at http://localhost:%d with password %s', config.port, PASSWORD);
+  console.log('Owner console: http://localhost:%d/owner.html  (owner@demo.com / %s)', config.port, PASSWORD);
   console.table([admin, manager, s1, s2, support, adsUser, hrUser, commUser, agent].map((u) => ({ role: u.role, email: u.email })));
   await mongoose.disconnect();
 })().catch((e) => { console.error(e); process.exit(1); });
