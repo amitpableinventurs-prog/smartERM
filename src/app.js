@@ -55,6 +55,7 @@ app.use('/api/activate', limiter(15 * 60e3, 100), require('./routes/activate'));
 // Provider callbacks (delivery receipts, IVR steps) arrive in bursts during bulk sends: higher limit.
 app.use('/api/webhooks/comm', limiter(60e3, 5000), require('./routes/hubhooks'));
 app.use('/api/webhooks', limiter(60e3, 120), require('./routes/inbound'));
+app.use('/api/oauth', limiter(15 * 60e3, 60), require('./routes/oauth')); // ad-network sign-in callbacks
 
 // Authenticated, company-scoped
 const api = express.Router();

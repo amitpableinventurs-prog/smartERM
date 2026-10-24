@@ -1,7 +1,8 @@
 /**
  * Advertising module: accounts, campaigns, creatives, daily performance data,
  * lead attribution, budget approvals and rule-based recommendations.
- * Spend/impression data is entered manually or via CSV import (no ad-network API sync).
+ * Performance data is entered manually, imported from CSV, or synced from Google Ads / Meta
+ * (services/adsync.js); status and budget changes on linked campaigns are pushed to the network.
  */
 const express = require('express');
 const { z } = require('zod');
@@ -11,48 +12,56 @@ const { authorize } = require('../middleware/auth');
 const { validate } = require('../middleware/common');
 const { HttpError, parseCsv } = require('../utils/helpers');
 const { notify, logActivity } = require('../services/events');
+const adsync = require('../services/adsync');
 
 const router = express.Router();
 const APPROVER_ROLES = ['super_admin', 'admin', 'manager'];
-const DEFAULT_APPROVAL_LIMIT = 5000; // daily budget above this needs a manager (company.settings.adApprovalLimit overrides)
 const MAX_IMPORT_ROWS = 5000;
 
 const day = (d) => { const x = new Date(d); return new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate())); };
 const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
-const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 const r2 = (n) => Math.round(n * 100) / 100;
 const div = (a, b) => (b ? a / b : 0);
-
-// Derived KPIs from summed raw numbers.
-function kpis(t) {
-  const { _id, ...rest } = t || {};
-  const x = { impressions: 0, clicks: 0, spend: 0, leads: 0, conversions: 0, revenue: 0, ...rest };
-  return {
-    ...x,
-    spend: r2(x.spend), revenue: r2(x.revenue),
-    ctr: r2(div(x.clicks, x.impressions) * 100), cpc: r2(div(x.spend, x.clicks)), cpm: r2(div(x.spend, x.impressions) * 1000),
-    cpl: r2(div(x.spend, x.leads)), cpa: r2(div(x.spend, x.conversions)), roas: r2(div(x.revenue, x.spend)),
-  };
-}
-const SUMS = { impressions: { $sum: '$impressions' }, clicks: { $sum: '$clicks' }, spend: { $sum: '$spend' }, leads: { $sum: '$leads' }, conversions: { $sum: '$conversions' }, revenue: { $sum: '$revenue' } };
-
-async function approvalLimit(company) {
-  const co = await M.Company.findById(company).select('settings');
-  return +co?.settings?.adApprovalLimit || DEFAULT_APPROVAL_LIMIT;
-}
+const { kpis, SUMS, approvalLimit, notifyApprovers } = adsync;
 const isApprover = (req) => APPROVER_ROLES.includes(req.user.role);
 
-async function notifyApprovers(company, title, body, id) {
-  const users = await M.User.find({ company, active: true, role: { $in: APPROVER_ROLES } }).select('_id');
-  await Promise.all(users.map((u) => notify(company, u._id, title, body, { kind: 'AdCampaign', id })));
-}
+const API_FIELDS = ['credentials', 'connected', 'lastSyncAt', 'lastSyncError']; // only through /:id/connection
 
 // ---------------- Accounts ----------------
 const accounts = crud({
   Model: M.AdAccount, resource: 'ads', search: ['name', 'accountId'], filters: ['platform', 'status'], scope: false,
   hooks: {
+    beforeCreate(req, data) { for (const k of API_FIELDS) delete data[k]; },
+    beforeUpdate(req, acc, data) { for (const k of API_FIELDS) delete data[k]; },
     async beforeDelete(req, acc) { if (await M.AdCampaign.exists({ account: acc._id })) throw new HttpError(409, 'Account still has campaigns'); },
   },
+});
+
+// ----- ad network API connection -----
+const account = (req) => adsync.loadAccount(req.companyId, req.params.id);
+
+accounts.router.get('/:id/connection', authorize('ads', 'r'), async (req, res) => res.json(adsync.connectionView(await account(req))));
+
+accounts.router.put('/:id/connection', authorize('ads', 'u'), async (req, res) => {
+  const acc = await adsync.saveConnection(await account(req), req.body || {});
+  await logActivity(req.companyId, { kind: 'AdAccount', id: acc._id }, 'ads.connected', `API connection for "${acc.name}" updated`, null, req.user._id);
+  res.json(adsync.connectionView(acc));
+});
+
+accounts.router.delete('/:id/connection', authorize('ads', 'u'), async (req, res) => {
+  res.json(adsync.connectionView(await adsync.disconnect(await account(req))));
+});
+
+accounts.router.post('/:id/sync', authorize('ads', 'u'), async (req, res) => {
+  const days = Math.min(90, Math.max(1, +req.body?.days || 30));
+  res.json(await adsync.syncAccount(await account(req), { days }));
+});
+
+// "Sign in with Google": returns the consent URL; Google redirects to /api/oauth/google-ads/callback.
+accounts.router.get('/:id/google-signin', authorize('ads', 'u'), async (req, res) => {
+  const acc = await account(req);
+  if (acc.platform !== 'google') throw new HttpError(400, 'Not a Google Ads account');
+  res.json({ url: require('./oauth').googleConsentUrl(req.companyId, acc._id) });
 });
 
 accounts.router.get('/summary', authorize('ads', 'r'), async (req, res) => {
@@ -84,15 +93,17 @@ const campaigns = crud({
       delete data.status; delete data.approvalNote;
       data.owner = req.user._id;
       data.utm = { source: acc.platform, medium: 'cpc', ...data.utm };
-      data.utm.campaign ||= `${slug(data.name)}-${Math.random().toString(36).slice(2, 6)}`; // unique tracking code for lead attribution
+      data.utm.campaign ||= adsync.trackingCode(data.name); // unique tracking code for lead attribution
       if (data.startDate && data.endDate && new Date(data.endDate) < new Date(data.startDate)) throw new HttpError(400, 'endDate is before startDate');
     },
     async beforeUpdate(req, c, data) {
-      delete data.status; delete data.approvalNote; delete data.owner;
+      delete data.status; delete data.approvalNote; delete data.owner; delete data.externalBudgetId; delete data.syncError;
       if (data.account && String(data.account) !== String(c.account)) throw new HttpError(400, 'Account cannot be changed');
+      if (data.externalId !== undefined && c.externalId && data.externalId !== c.externalId) throw new HttpError(400, 'Linked network campaign cannot be changed');
       if (data.dailyBudget != null && c.status === 'active' && !isApprover(req) && data.dailyBudget > (await approvalLimit(req.companyId))) {
         throw new HttpError(403, 'Daily budget above the approval limit needs a manager');
       }
+      if (data.dailyBudget != null && data.dailyBudget !== c.dailyBudget) await adsync.push(c, { dailyBudget: data.dailyBudget });
     },
     async beforeDelete(req, c) {
       await M.AdCreative.deleteMany({ campaign: c._id });
@@ -105,10 +116,7 @@ const campaigns = crud({
 const setStatus = (to, from) => async (req, res) => {
   const c = await campaigns.find(req);
   if (!from.includes(c.status)) throw new HttpError(409, `Cannot do this while campaign is ${c.status}`);
-  c.status = to;
-  await c.save();
-  await logActivity(req.companyId, { kind: 'AdCampaign', id: c._id }, `ad.${to}`, `Campaign "${c.name}" is now ${to}`, null, req.user._id);
-  res.json(c);
+  res.json(await adsync.changeStatus(c, to, { by: req.user._id }));
 };
 
 campaigns.router.post('/:id/launch', authorize('ads', 'u'), async (req, res) => {
@@ -121,20 +129,14 @@ campaigns.router.post('/:id/launch', authorize('ads', 'u'), async (req, res) => 
     await notifyApprovers(req.companyId, 'Ad campaign needs approval', `${c.name} (daily budget ${c.dailyBudget})`, c._id);
     return res.json({ ...c.toObject(), message: 'Budget is above your approval limit; sent to a manager.' });
   }
-  c.status = 'active';
-  if (!c.startDate) c.startDate = day(new Date());
-  await c.save();
-  res.json(c);
+  res.json(await adsync.changeStatus(c, 'active', { by: req.user._id }));
 });
 
 campaigns.router.post('/:id/approve', authorize('ads', 'u'), async (req, res) => {
   if (!isApprover(req)) throw new HttpError(403, 'Only a manager or admin can approve');
   const c = await campaigns.find(req);
   if (c.status !== 'pending_approval') throw new HttpError(409, 'Campaign is not waiting for approval');
-  c.status = 'active';
-  c.approvalNote = `Approved by ${req.user.name}`;
-  if (!c.startDate) c.startDate = day(new Date());
-  await c.save();
+  await adsync.changeStatus(c, 'active', { note: `Approved by ${req.user.name}`, by: req.user._id });
   await notify(req.companyId, c.owner, 'Campaign approved', c.name, { kind: 'AdCampaign', id: c._id });
   res.json(c);
 });
@@ -154,10 +156,22 @@ campaigns.router.post('/:id/pause', authorize('ads', 'u'), setStatus('paused', [
 campaigns.router.post('/:id/resume', authorize('ads', 'u'), setStatus('active', ['paused']));
 campaigns.router.post('/:id/end', authorize('ads', 'u'), setStatus('ended', ['active', 'paused', 'draft']));
 
+// Re-checks one campaign now: budget cap, no-leads rule and the ad.performance_updated workflows (normally after each sync / data entry).
+campaigns.router.post('/:id/run-automation', authorize('ads', 'u'), async (req, res) => {
+  const c = await campaigns.find(req);
+  const since = new Date();
+  const autoPaused = await adsync.afterNewData(req.companyId, [c._id]);
+  const runs = await M.WorkflowRun.find({ company: req.companyId, 'entity.id': c._id, createdAt: { $gte: since } }).populate('workflow', 'name');
+  res.json({
+    campaign: await M.AdCampaign.findById(c._id), autoPaused, stats: await adsync.campaignStats(c),
+    runs: runs.map((r) => ({ workflow: r.workflow?.name, event: r.event, status: r.status, error: r.error, log: r.log.map((l) => `${l.ok ? '✓' : '✗'} ${l.step} ${l.detail}`) })),
+  });
+});
+
 campaigns.router.post('/:id/clone', authorize('ads', 'c'), async (req, res) => {
   const c = (await campaigns.find(req)).toObject();
-  const { _id, __v, createdAt, updatedAt, status, utm, approvalNote, ...rest } = c;
-  const copy = await M.AdCampaign.create({ ...rest, name: `${c.name} (copy)`, owner: req.user._id, utm: { ...utm, campaign: `${slug(c.name)}-${Math.random().toString(36).slice(2, 6)}` } });
+  const { _id, __v, createdAt, updatedAt, status, utm, approvalNote, externalId, externalBudgetId, syncError, ...rest } = c;
+  const copy = await M.AdCampaign.create({ ...rest, name: `${c.name} (copy)`, owner: req.user._id, utm: { ...utm, campaign: adsync.trackingCode(c.name) } });
   const creatives = await M.AdCreative.find({ campaign: c._id });
   await M.AdCreative.insertMany(creatives.map((x) => { const o = x.toObject(); delete o._id; delete o.__v; delete o.createdAt; delete o.updatedAt; return { ...o, campaign: copy._id }; }));
   res.status(201).json(copy);
@@ -228,25 +242,11 @@ const rowSchema = z.object({
   impressions: num, clicks: num, spend: num, leads: num, conversions: num, revenue: num,
 }).refine((r) => r.clicks <= r.impressions || r.impressions === 0, { message: 'clicks cannot exceed impressions' });
 
-// Auto-pause when the lifetime budget is used up.
-async function enforceBudget(company, campaignId) {
-  const c = await M.AdCampaign.findOne({ _id: campaignId, company });
-  if (!c || c.status !== 'active' || !c.totalBudget) return;
-  const [t] = await M.AdMetric.aggregate([{ $match: { company, campaign: c._id } }, { $group: { _id: null, spend: { $sum: '$spend' } } }]);
-  if ((t?.spend || 0) >= c.totalBudget) {
-    c.status = 'paused';
-    c.approvalNote = 'Auto-paused: total budget used';
-    await c.save();
-    await notify(company, c.owner, 'Campaign auto-paused', `${c.name} reached its total budget`, { kind: 'AdCampaign', id: c._id });
-  }
-}
-
 async function upsertMetric(company, r) {
   if (!(await M.AdCampaign.exists({ _id: r.campaign, company }))) throw new Error('Campaign not found');
   if (r.creative && !(await M.AdCreative.exists({ _id: r.creative, company, campaign: r.campaign }))) throw new Error('Creative does not belong to campaign');
   const { campaign, creative, date, ...vals } = r;
   await M.AdMetric.updateOne({ company, campaign, creative: creative || null, date: day(date) }, { $set: vals }, { upsert: true });
-  await enforceBudget(company, campaign);
 }
 
 metrics.get('/', authorize('ads', 'r'), async (req, res) => {
@@ -263,6 +263,7 @@ metrics.get('/', authorize('ads', 'r'), async (req, res) => {
 
 metrics.post('/', authorize('ads', 'c'), validate(rowSchema), async (req, res) => {
   try { await upsertMetric(req.companyId, req.body); } catch (e) { throw new HttpError(400, e.message); }
+  await adsync.afterNewData(req.companyId, [req.body.campaign]); // budget cap, no-leads rule, workflow triggers
   res.status(201).json({ saved: true });
 });
 
@@ -274,14 +275,15 @@ metrics.post('/import', express.text({ type: ['text/csv', 'text/plain'], limit: 
   if (rows.length > MAX_IMPORT_ROWS) throw new HttpError(400, `Max ${MAX_IMPORT_ROWS} rows per import`);
   const camps = await M.AdCampaign.find({ company: req.companyId }).select('name utm');
   const byKey = new Map(camps.flatMap((c) => [[c.name.toLowerCase(), c._id], [String(c.utm?.campaign || '').toLowerCase(), c._id]]));
-  let saved = 0; const errors = [];
+  let saved = 0; const errors = []; const touched = new Set();
   for (const [i, r] of rows.entries()) {
     const id = byKey.get(String(r.campaign || '').toLowerCase());
     if (!id) { errors.push({ row: i + 2, error: `Unknown campaign "${r.campaign}"` }); continue; }
     const parsed = rowSchema.safeParse({ ...r, campaign: String(id), creative: undefined });
     if (!parsed.success) { errors.push({ row: i + 2, error: parsed.error.issues[0].message }); continue; }
-    try { await upsertMetric(req.companyId, parsed.data); saved++; } catch (e) { errors.push({ row: i + 2, error: e.message }); }
+    try { await upsertMetric(req.companyId, parsed.data); saved++; touched.add(String(id)); } catch (e) { errors.push({ row: i + 2, error: e.message }); }
   }
+  await adsync.afterNewData(req.companyId, [...touched]);
   res.status(201).json({ saved, failed: errors.length, errors: errors.slice(0, 50) });
 });
 
@@ -373,7 +375,7 @@ router.get('/insights', authorize('ads', 'r'), async (req, res) => {
   for (const c of active) {
     const m = by[String(c._id)];
     if (!m || (!m.impressions && !m.spend)) { add('medium', c, 'No delivery', 'Active but no data in 14 days. Check the ad network or import fresh numbers.'); continue; }
-    if (m.spend > 0 && m.leads === 0 && m.spend >= Math.max(1000, overall.cpl * 2)) {
+    if (adsync.wastingSpend(m, overall.cpl)) {
       add('high', c, 'Spending with no leads', `Spent ${m.spend} with zero leads in 14 days.`, { label: 'Pause campaign', method: 'POST', path: `/ads/campaigns/${c._id}/pause` });
     } else if (overall.cpl && m.leads >= 3 && m.cpl > overall.cpl * 1.5) {
       add('high', c, 'Cost per lead is high', `CPL ${m.cpl} vs account average ${overall.cpl}. Reduce budget or fix targeting.`, { label: 'Cut daily budget 30%', method: 'PATCH', path: `/ads/campaigns/${c._id}`, body: { dailyBudget: Math.round(c.dailyBudget * 0.7) } });

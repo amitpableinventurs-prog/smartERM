@@ -12,12 +12,18 @@
  *   add_tag       { tag }
  *   notify        { to: 'owner' | 'managers' | userId, title, body? }
  *   ai_score      {}
+ *   ad_pause | ad_resume   {}                         (ad campaign triggers; applied on Google Ads / Meta when linked)
+ *   ad_set_budget { value? | changePct?, min?, max? } (never above the company's ad approval limit)
  *   wait          { days?, hours?, minutes? }
  *   condition     { if: cond, then: [step], else: [step] }
  *
  * cond = { field, op, value } | { type: 'no_reply' }
  *   op: eq ne gt gte lt lte contains in exists. `field` is a path on the entity
- *   (or `payload.*` for trigger conditions, e.g. payload.to for status changes).
+ *   or `payload.*` for the event data, e.g. payload.to for status changes, payload.cpl for ad.performance_updated.
+ *
+ * Ad events run on the AdCampaign (ad.sync_failed on the AdAccount). ad.performance_updated payload:
+ *   last 7 days { spend, leads, clicks, impressions, conversions, revenue, ctr, cpc, cpl, cpa, roas },
+ *   today { same fields }, lifetimeSpend, budgetUsedPct.
  */
 const M = require('../models');
 const { send, addressFor } = require('./communication');
@@ -26,8 +32,9 @@ const { notify, logActivity } = require('./events');
 const { render, addDays } = require('../utils/helpers');
 const { accessProblem } = require('../modules');
 const tenants = require('./tenants');
+const adsync = require('./adsync');
 
-const MODELS = { Lead: M.Lead, Customer: M.Customer, Deal: M.Deal, Task: M.Task };
+const MODELS = { Lead: M.Lead, Customer: M.Customer, Deal: M.Deal, Task: M.Task, AdCampaign: M.AdCampaign, AdAccount: M.AdAccount };
 const MAX_STEPS_PER_RUN = 200;
 
 const get = (obj, path) => path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
@@ -127,11 +134,33 @@ async function doStep(step, ctx, run) {
     case 'notify': {
       const tdata = await withPerson();
       let targets = [];
-      if (step.to === 'owner') targets = [entity.assignedTo];
+      if (step.to === 'owner') targets = [entity.assignedTo || entity.owner];
       else if (step.to === 'managers') targets = (await M.User.find({ company, role: { $in: ['manager', 'admin', 'super_admin'] }, active: true }).select('_id')).map((u) => u._id);
       else targets = [step.to];
       await Promise.all(targets.filter(Boolean).map((u) => notify(company, u, render(step.title, tdata), render(step.body || '', tdata), { kind: ctx.kind, id: entity._id })));
       return `${targets.filter(Boolean).length} notified`;
+    }
+    case 'ad_pause':
+    case 'ad_resume': {
+      if (ctx.kind !== 'AdCampaign') return 'skipped (not an ad campaign)';
+      const to = step.type === 'ad_pause' ? 'paused' : 'active';
+      if (entity.status === to) return `already ${to}`;
+      if (step.type === 'ad_resume' && entity.status !== 'paused') return `skipped (campaign is ${entity.status})`;
+      await adsync.changeStatus(entity, to, { note: `${to === 'paused' ? 'Paused' : 'Resumed'} by workflow` });
+      return to;
+    }
+    case 'ad_set_budget': {
+      if (ctx.kind !== 'AdCampaign') return 'skipped (not an ad campaign)';
+      const cur = entity.dailyBudget || 0;
+      let next = step.value != null ? +step.value : Math.round(cur * (1 + (+step.changePct || 0) / 100));
+      if (step.max != null) next = Math.min(next, +step.max);
+      if (step.min != null) next = Math.max(next, +step.min);
+      if (!(next > 0)) throw new Error('Budget must be above 0');
+      const limit = await adsync.approvalLimit(company);
+      if (next > cur && next > limit) throw new Error(`New budget ${next} is above the approval limit ${limit}; a manager must raise it`);
+      await adsync.changeBudget(entity, next);
+      await logActivity(company, { kind: 'AdCampaign', id: entity._id }, 'ad.budget', `Daily budget ${cur} -> ${next} by workflow`);
+      return `daily budget ${cur} -> ${next}`;
     }
     case 'ai_score': {
       if (ctx.kind !== 'Lead') return 'skipped (not a lead)';
@@ -196,7 +225,7 @@ async function execute(run) {
     if (!wf || !entity) throw new Error('Workflow or entity no longer exists');
     run.status = 'running';
     run.resumeAt = undefined;
-    const data = () => ({ ...entity.toObject(), [run.entity.kind.toLowerCase()]: entity.toObject(), entity: entity.toObject() });
+    const data = () => ({ ...entity.toObject(), [run.entity.kind.toLowerCase()]: entity.toObject(), entity: entity.toObject(), payload: run.payload || {} });
     const ctx = { company: run.company, kind: run.entity.kind, entity, get data() { return data(); } };
     const result = await runSteps(run, wf.steps, 0, ctx);
     if (result === 'done') {
@@ -227,7 +256,7 @@ async function trigger(company, event, entityRef, payload = {}, only) {
     let ok = true;
     for (const c of wf.trigger.conditions || []) if (!(await evalCond(c, ctx))) { ok = false; break; }
     if (!ok) continue;
-    const run = await M.WorkflowRun.create({ company, workflow: wf._id, event, entity: entityRef, startedAtMs: Date.now() });
+    const run = await M.WorkflowRun.create({ company, workflow: wf._id, event, entity: entityRef, payload, startedAtMs: Date.now() });
     await M.Workflow.updateOne({ _id: wf._id }, { $inc: { 'stats.runs': 1 } });
     runs.push(await execute(run));
   }
@@ -268,7 +297,8 @@ const EVENTS = [
   'lead.created', 'lead.status_changed', 'deal.created', 'deal.stage_changed', 'payment.received',
   'followup.overdue', 'customer.inactive', 'customer.birthday', 'customer.anniversary',
   'form.submitted', 'whatsapp.received', 'email.received', 'website.activity',
-  'sms.received', 'message.intent', 'conversation.handoff', 'call.completed',
+  'sms.received', 'message.intent', 'conversation.handoff', 'call.completed', 'justdial.enquiry',
+  'ad.performance_updated', 'ad.no_leads', 'ad.budget_exhausted', 'ad.campaign_imported', 'ad.status_changed', 'ad.sync_failed',
 ];
 
 // Ready-made workflows a company can clone.
@@ -316,6 +346,49 @@ const TEMPLATES = [
     trigger: { event: 'customer.inactive', conditions: [] },
     steps: [{ type: 'send_email', subject: 'We miss you, {{person.name}}', body: 'It has been a while! Here is something special for you.' }, { type: 'create_task', title: 'Call inactive customer {{person.name}}', dueInDays: 2 }],
   },
+  {
+    name: 'JustDial enquiry: assign, WhatsApp, call task',
+    trigger: { event: 'justdial.enquiry', conditions: [] },
+    steps: [
+      { type: 'assign', strategy: 'least_loaded' },
+      { type: 'send_whatsapp', body: 'Hi {{person.name}}, thanks for your enquiry on JustDial! Our team will call you shortly.' },
+      { type: 'create_task', title: 'Call JustDial enquiry {{person.name}}', dueInDays: 0, priority: 'high' },
+    ],
+  },
+  {
+    name: 'Ads: pause when cost per lead is too high',
+    trigger: { event: 'ad.performance_updated', conditions: [
+      { field: 'status', op: 'eq', value: 'active' }, { field: 'objective', op: 'eq', value: 'leads' },
+      { field: 'payload.leads', op: 'gte', value: 3 }, { field: 'payload.cpl', op: 'gt', value: 800 },
+    ] },
+    steps: [
+      { type: 'ad_pause' },
+      { type: 'notify', to: 'managers', title: 'Paused {{name}}', body: 'Cost per lead {{payload.cpl}} over the last 7 days (spend {{payload.spend}}, {{payload.leads}} leads)' },
+    ],
+  },
+  {
+    name: 'Ads: scale winners by 20% (capped)',
+    trigger: { event: 'ad.performance_updated', conditions: [
+      { field: 'status', op: 'eq', value: 'active' }, { field: 'payload.roas', op: 'gte', value: 3 }, { field: 'payload.spend', op: 'gte', value: 2000 },
+    ] },
+    steps: [
+      { type: 'ad_set_budget', changePct: 20, max: 5000 },
+      { type: 'notify', to: 'managers', title: 'Scaled {{name}}', body: 'ROAS {{payload.roas}}x over 7 days; daily budget raised by 20%' },
+    ],
+  },
+  {
+    name: 'Ads: spending with no leads',
+    trigger: { event: 'ad.no_leads', conditions: [] },
+    steps: [
+      { type: 'ad_pause' },
+      { type: 'notify', to: 'managers', title: '{{name}} paused: no leads', body: 'Spent {{payload.spend}} in {{payload.days}} days without a lead' },
+    ],
+  },
+  {
+    name: 'Ads: alert when an ad account stops syncing',
+    trigger: { event: 'ad.sync_failed', conditions: [] },
+    steps: [{ type: 'notify', to: 'managers', title: 'Ad sync failed: {{name}}', body: '{{payload.error}}' }],
+  },
 ];
 
-module.exports = { trigger, resumeDue, execute, runActions, EVENTS, TEMPLATES, evalCond };
+module.exports = { trigger, resumeDue, execute, runActions, EVENTS, TEMPLATES, evalCond, MODELS };

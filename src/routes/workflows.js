@@ -4,8 +4,10 @@ const { crud } = require('../utils/crud');
 const { authorize } = require('../middleware/auth');
 const { HttpError } = require('../utils/helpers');
 const automation = require('../services/automation');
+const adsync = require('../services/adsync');
 
-const STEP_TYPES = ['assign', 'send_email', 'send_whatsapp', 'send_sms', 'create_task', 'update_field', 'add_tag', 'notify', 'ai_score', 'wait', 'condition'];
+const STEP_TYPES = ['assign', 'send_email', 'send_whatsapp', 'send_sms', 'create_task', 'update_field', 'add_tag', 'notify', 'ai_score', 'ad_pause', 'ad_resume', 'ad_set_budget', 'wait', 'condition'];
+const TEST_KINDS = ['Lead', 'Customer', 'Deal', 'Task', 'AdCampaign', 'AdAccount'];
 
 const step = z.lazy(() =>
   z.object({ type: z.enum(STEP_TYPES), then: z.array(step).optional(), else: z.array(step).optional() }).passthrough()
@@ -58,8 +60,11 @@ c.router.get('/:id/runs', authorize('workflows', 'r'), async (req, res) => {
 c.router.post('/:id/test', authorize('workflows', 'u'), async (req, res) => {
   const wf = await c.find(req);
   const { kind, id } = req.body;
-  if (!['Lead', 'Customer', 'Deal', 'Task'].includes(kind) || !id) throw new HttpError(400, 'kind and id are required');
-  res.json(await automation.trigger(req.companyId, wf.trigger.event, { kind, id }, { test: true }, wf._id));
+  if (!TEST_KINDS.includes(kind) || !id) throw new HttpError(400, 'kind and id are required');
+  if (!(await automation.MODELS[kind].exists({ _id: id, company: req.companyId }))) throw new HttpError(404, `${kind} not found`);
+  // Ad campaigns get their real last-7-day numbers, so payload.* conditions can be tried out.
+  const payload = kind === 'AdCampaign' ? await adsync.campaignStats(await automation.MODELS.AdCampaign.findById(id)) : {};
+  res.json(await automation.trigger(req.companyId, wf.trigger.event, { kind, id }, { ...payload, test: true }, wf._id));
 });
 
 module.exports = c.finish();

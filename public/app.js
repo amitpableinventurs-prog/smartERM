@@ -196,7 +196,7 @@ function form(fields, row = {}) {
 
 // ---------- generic list module ----------
 const LEAD_STAGES = ['new', 'contacted', 'qualified', 'proposal_sent', 'negotiation', 'won', 'lost'];
-const SOURCES = ['manual', 'website', 'form', 'referral', 'whatsapp', 'sms', 'ivr', 'bulk', 'event', 'ads', 'import'];
+const SOURCES = ['manual', 'website', 'form', 'referral', 'whatsapp', 'sms', 'ivr', 'bulk', 'event', 'ads', 'justdial', 'import'];
 
 function pill(v) { return v == null || v === '' ? '' : h('span', { class: 'pill ' + String(v) }, String(v)); }
 const cell = (row, c) => {
@@ -241,7 +241,7 @@ function listModule(cfg) {
       if (st.q) qs.set('q', st.q);
       if (st.filter) qs.set(cfg.filterField, st.filter);
       const r = await api(`${cfg.path}?${qs}`);
-      const rows = Array.isArray(r) ? r : r.data;
+      const rows = cfg.rows ? cfg.rows(Array.isArray(r) ? r : r.data) : Array.isArray(r) ? r : r.data; // cfg.rows adds computed columns
       const acts = (cfg.actions || []).filter((a) => !a.perm || can(...a.perm));
       const tbl = h('table', {}, h('thead', {}, h('tr', {}, cfg.cols.map((c) => h('th', {}, c.label || c.k)), h('th', {}))),
         h('tbody', {}, rows.map((row) => h('tr', {}, cfg.cols.map((c) => h('td', {}, cell(row, c))),
@@ -411,7 +411,7 @@ MODULES.workflows = { title: 'Automation', render: async (root) => {
     actions: [
       { label: 'On/Off', perm: ['workflows', 'u'], run: async (r, reload) => { await api(`/workflows/${r._id}/toggle`, { method: 'POST' }); reload(); } },
       { label: 'Runs', run: async (r) => { const runs = await api(`/workflows/${r._id}/runs`); modal('Recent runs', runs.length ? h('div', {}, runs.map((x) => h('div', { class: 'kcard' }, h('b', {}, fmtDate(x.createdAt)), ' ', pill(x.status), x.error && h('div', { class: 'muted' }, x.error), h('div', { class: 'muted' }, x.log.map((l) => `${l.ok ? '✓' : '✗'} ${l.step} ${l.detail}`).join(' → '))))) : h('p', { class: 'muted' }, 'No runs yet.'), [], true); } },
-      { label: 'Test on…', perm: ['workflows', 'u'], run: async (r) => { const f = form([{ k: 'kind', type: 'select', opts: ['Lead', 'Customer', 'Deal', 'Task'], req: true }, { k: 'id', label: 'Record ID', req: true }]); modal('Run workflow on a record', f, [{ label: 'Run', run: async () => { const x = await api(`/workflows/${r._id}/test`, { method: 'POST', body: f.values() }); toast(`Run ${x[0]?.status || 'skipped (conditions not met)'}`); } }]); } },
+      { label: 'Test on…', perm: ['workflows', 'u'], run: async (r) => { const f = form([{ k: 'kind', type: 'select', opts: ['Lead', 'Customer', 'Deal', 'Task', 'AdCampaign', 'AdAccount'], req: true }, { k: 'id', label: 'Record ID', req: true }]); modal('Run workflow on a record', f, [{ label: 'Run', run: async () => { const x = await api(`/workflows/${r._id}/test`, { method: 'POST', body: f.values() }); toast(`Run ${x[0]?.status || 'skipped (conditions not met)'}`); } }]); } },
     ],
   })(holder);
 } };
@@ -485,9 +485,12 @@ MODULES.company = { title: 'Company Settings', render: async (root) => {
   const co = await api('/company');
   const name = h('input', { value: co.name });
   const key = h('code', {}, co.apiKey || '(hidden)');
+  const jdUrl = (k) => `${DESK.apiBase || location.origin}/api/webhooks/justdial/${k}`;
+  const jd = h('code', {}, jdUrl(co.apiKey));
   root.append(h('div', { class: 'card' }, h('label', {}, 'Company name'), name,
-    isAdmin() && [h('label', {}, 'API key (for web-form webhook: POST /api/webhooks/form/<key>)'), key],
-    h('div', { class: 'acts' }, can('company', 'u') && h('button', { class: 'btn sec', onclick: guard(async () => { key.textContent = (await api('/company/rotate-api-key', { method: 'POST' })).apiKey; toast('Key rotated'); }) }, 'Rotate API key'),
+    isAdmin() && [h('label', {}, 'API key (for web-form webhook: POST /api/webhooks/form/<key>)'), key,
+      h('label', {}, 'JustDial lead push URL (send it to your JustDial account manager; new enquiries become leads with source "justdial")'), jd],
+    h('div', { class: 'acts' }, can('company', 'u') && h('button', { class: 'btn sec', onclick: guard(async () => { const k = (await api('/company/rotate-api-key', { method: 'POST' })).apiKey; key.textContent = k; jd.textContent = jdUrl(k); toast('Key rotated. Update the JustDial URL too.'); }) }, 'Rotate API key'),
       can('company', 'u') && h('button', { class: 'btn', onclick: guard(async () => { await api('/company', { method: 'PATCH', body: { name: name.value } }); toast('Saved'); }) }, 'Save'))));
 } };
 
@@ -617,18 +620,57 @@ MODULES.adaccounts = { title: 'Ad Accounts', render: async (root) => {
   });
   await listModule({
     res: 'ads', path: '/ads/accounts', title: 'Ad account', filterField: 'platform', filterOpts: PLATFORMS,
-    cols: [{ k: 'name', who: true }, { k: 'platform', pill: true }, { k: 'accountId', label: 'Account ID' }, { k: 'currency' }, { k: 'monthlyBudget', label: 'Monthly budget', money: true }, { k: 'status', pill: true }],
-    fields: [{ k: 'platform', type: 'select', opts: PLATFORMS, req: true }, { k: 'name', req: true }, { k: 'accountId', label: 'Account ID (from the ad network)' }, { k: 'currency' }, { k: 'monthlyBudget', type: 'number' }, { k: 'status', type: 'select', opts: ['active', 'paused', 'disconnected'] }],
+    note: 'Google Ads and Meta accounts can be connected to their API: campaigns, spend and conversions sync every 3 hours, and Pause / Resume / budget changes in the CRM are applied on the ad network.',
+    cols: [{ k: 'name', who: true }, { k: 'platform', pill: true }, { k: 'accountId', label: 'Account ID' }, { k: 'currency' }, { k: 'monthlyBudget', label: 'Monthly budget', money: true }, { k: 'status', pill: true },
+      { k: 'api', label: 'API sync' }],
+    rows: (rows) => rows.map((r) => ({ ...r, api: !API_PLATFORMS.includes(r.platform) ? '—' : !r.connected ? 'Not connected' : r.lastSyncError ? '⚠ ' + r.lastSyncError.slice(0, 60) : r.lastSyncAt ? 'Synced ' + fmtDate(r.lastSyncAt) : 'Connected' })),
+    fields: [{ k: 'platform', type: 'select', opts: PLATFORMS, req: true }, { k: 'name', req: true }, { k: 'accountId', label: 'Account ID (Google: customer ID 123-456-7890 · Meta: act_123…)' }, { k: 'currency' }, { k: 'monthlyBudget', type: 'number' }, { k: 'status', type: 'select', opts: ['active', 'paused', 'disconnected'] }],
+    actions: [
+      { label: 'Connect API', perm: ['ads', 'u'], show: (r) => API_PLATFORMS.includes(r.platform), run: (r, reload) => connectModal(r, () => { reload(); loadSum(); }) },
+      { label: 'Sync now', perm: ['ads', 'u'], show: (r) => r.connected, run: async (r, reload) => { toast('Syncing…'); const x = await api(`/ads/accounts/${r._id}/sync`, { method: 'POST', body: { days: 30 } });
+        toast(`Synced: ${x.campaignsCreated} new, ${x.campaignsUpdated} updated campaigns, ${x.metricRows} days of data${x.autoPaused ? `, ${x.autoPaused} auto-paused` : ''}`); reload(); loadSum(); } },
+    ],
   })(holder);
   loadSum();
 } };
 
+const API_PLATFORMS = ['google', 'meta'];
+const API_HELP = {
+  google: 'Account ID must be the Google Ads customer ID. Use "Sign in with Google", or paste a refresh token made with your OAuth client (OAuth Playground, scope https://www.googleapis.com/auth/adwords). If the account is managed through an MCC, enter the MCC ID.',
+  meta: 'Account ID must be the ad account ID (act_…). Create a System User in Meta Business Settings, assign it the ad account, and generate a token with ads_read and ads_management. A WhatsApp token works too if it has those permissions.',
+};
+
+// Ad network API credentials for one account. Secret values come back masked; leaving them unchanged keeps them.
+async function connectModal(acc, done) {
+  const c = await api(`/ads/accounts/${acc._id}/connection`);
+  const fields = c.fields.map((f) => ({ k: f.k, label: f.label + (f.req ? '' : ' (optional)'), type: f.secret ? 'password' : 'text' }));
+  const f = form(fields, c.config);
+  const sync = h('input', { type: 'checkbox', style: 'width:auto', checked: c.autoSync });
+  const pause = h('input', { type: 'checkbox', style: 'width:auto', checked: c.autoPause });
+  const sd = c.serverDefaults;
+  const body = h('div', {},
+    h('p', { class: 'muted', style: 'margin:0' }, API_HELP[acc.platform]),
+    sd && h('p', { class: 'muted' }, `Server defaults: developer token ${sd.developerToken ? 'set' : 'NOT set'} · OAuth client ${sd.oauthClient ? 'set' : 'NOT set'}`),
+    c.lastSyncError && h('div', { class: 'warnbar' }, 'Last error: ' + c.lastSyncError),
+    f,
+    h('label', {}, sync, ' Sync automatically every 3 hours'),
+    h('label', {}, pause, ' Auto-pause lead campaigns that spend for 14 days with no leads'));
+  const buttons = [{ label: 'Save & test', run: async () => {
+    const r = await api(`/ads/accounts/${acc._id}/connection`, { method: 'PUT', body: { config: f.values(), autoSync: sync.checked, autoPause: pause.checked } });
+    toast(r.lastSyncError ? 'Saved, but the test failed: ' + r.lastSyncError : 'Connected. Press "Sync now" to import campaigns.', !!r.lastSyncError); done();
+  } }];
+  if (sd?.signIn) buttons.unshift({ keep: true, cls: 'sec', label: 'Sign in with Google', run: async () => { window.open((await api(`/ads/accounts/${acc._id}/google-signin`)).url, '_blank'); toast('Finish in the Google window, then come back and press "Sync now".'); } });
+  if (c.connected) buttons.push({ cls: 'bad', label: 'Disconnect', run: async () => { if (!confirm('Remove the API credentials? Imported campaigns and data stay.')) return false; await api(`/ads/accounts/${acc._id}/connection`, { method: 'DELETE' }); toast('Disconnected'); done(); } });
+  modal('Connect API — ' + acc.name, body, buttons, true);
+}
+
 MODULES.adcampaigns = { title: 'Ad Campaigns', render: listModule({
   res: 'ads', path: '/ads/campaigns', title: 'Campaign', filterField: 'status', filterOpts: ['draft', 'pending_approval', 'active', 'paused', 'ended'],
-  note: 'Daily budgets above the approval limit (default ₹5,000) are sent to a manager when launched. Campaigns auto-pause when the total budget is used.',
+  note: 'Daily budgets above the approval limit (default ₹5,000) are sent to a manager when launched. Campaigns auto-pause when the total budget is used. Campaigns imported from Google Ads / Meta are paused, resumed and re-budgeted on the ad network too.',
   cols: [{ k: 'name' }, { k: 'account.platform', label: 'Platform', pill: true }, { k: 'objective' }, { k: 'status', pill: true }, { k: 'dailyBudget', label: 'Daily budget', money: true }, { k: 'totalBudget', label: 'Total budget', money: true }, { k: 'endDate', label: 'Ends', date: true }],
   fields: [{ k: 'name', req: true }, { k: 'account', type: 'ref', src: '/ads/accounts', label: 'Ad account', req: true, createOnly: true }, { k: 'objective', type: 'select', opts: ['leads', 'sales', 'traffic', 'awareness', 'engagement'] },
     { k: 'dailyBudget', type: 'number' }, { k: 'totalBudget', type: 'number', label: 'Total (lifetime) budget' }, { k: 'startDate', type: 'datetime' }, { k: 'endDate', type: 'datetime' },
+    { k: 'externalId', label: 'Ad network campaign ID (links an existing Google/Meta campaign; set by sync for imported ones)' },
     { k: 'audience.locations', type: 'tags', label: 'Target locations (comma separated)' }, { k: 'audience.ageMin', type: 'number', label: 'Age from' }, { k: 'audience.ageMax', type: 'number', label: 'Age to' }, { k: 'audience.interests', type: 'tags', label: 'Interests (comma separated)' }, { k: 'notes', type: 'textarea' }],
   actions: [
     { label: 'Launch', perm: ['ads', 'u'], show: (r) => r.status === 'draft', run: async (r, reload) => { const x = await api(`/ads/campaigns/${r._id}/launch`, { method: 'POST' }); toast(x.message || 'Campaign is live'); reload(); } },
@@ -639,6 +681,12 @@ MODULES.adcampaigns = { title: 'Ad Campaigns', render: listModule({
     { label: 'Performance', run: async (r) => { const p = await api(`/ads/campaigns/${r._id}/performance?days=30`);
       modal('Performance — ' + r.name, h('div', {}, kpiGrid(p.totals), h('p', { class: 'muted' }, `CRM leads attributed: ${p.crmLeads} · Lifetime spend ${money(p.totalSpentAllTime)}${p.budgetUsedPct != null ? ` (${p.budgetUsedPct}% of total budget)` : ''}`), dualChart(p.daily)), [], true); } },
     { label: 'Add data', perm: ['ads', 'c'], run: (r) => metricModal(r._id) },
+    { label: 'Run automation', perm: ['ads', 'u'], run: async (r, reload) => { const x = await api(`/ads/campaigns/${r._id}/run-automation`, { method: 'POST' }); const s = x.stats;
+      modal('Automation — ' + r.name, h('div', {},
+        h('p', { class: 'muted', style: 'margin:0 0 10px' }, `Last 7 days: spend ${money(s.spend)} · ${s.leads} leads · CPL ${money(s.cpl)} · ROAS ${s.roas}x · CTR ${s.ctr}%. Status now: ${x.campaign.status}${x.autoPaused ? ' (auto-paused)' : ''}`),
+        x.runs.length ? x.runs.map((w) => h('div', { class: 'kcard' }, h('b', {}, w.workflow || 'Workflow'), ' ', pill(w.status), w.error && h('div', { class: 'muted' }, w.error), h('div', { class: 'muted' }, w.log.join(' → '))))
+          : h('p', { class: 'muted' }, 'No active workflow matched. Install an "Ads:" template under Automation and switch it on.')), [], true);
+      reload(); } },
     { label: 'Track link', run: async (r) => { const u = h('input', { placeholder: 'https://yoursite.com/landing-page' }); const out = h('pre', {}, 'Enter your landing page URL and press Generate.');
       modal('Tracking link — ' + r.name, h('div', {}, h('p', { class: 'muted' }, 'Use this as the ad destination URL. When the landing page form posts utm_campaign to the CRM web-form webhook, the lead is linked to this campaign.'), u, h('div', { style: 'height:10px' }), out),
         [{ keep: true, label: 'Generate', run: async () => { const x = await api(`/ads/campaigns/${r._id}/utm?url=${encodeURIComponent(u.value)}`); out.textContent = x.url; } },

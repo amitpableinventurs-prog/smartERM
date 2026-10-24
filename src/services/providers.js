@@ -47,7 +47,7 @@ const FIELDS = {
     { k: 'accessToken', label: 'Permanent access token', secret: true, req: true },
     { k: 'verifyToken', label: 'Webhook verify token (you choose it)', secret: true },
     { k: 'appSecret', label: 'App secret (validates webhook signatures)', secret: true },
-    { k: 'apiVersion', label: 'Graph API version', placeholder: 'v21.0' },
+    { k: 'apiVersion', label: 'Graph API version', placeholder: config.metaGraphVersion },
   ],
   http: [
     { k: 'url', label: 'Request URL (may contain {{to}}, {{body_url}}, {{from}})', secret: true, req: true },
@@ -63,22 +63,23 @@ const ALLOWED = { sms: ['simulated', 'twilio', 'http'], whatsapp: ['simulated', 
 const mask = (v) => (v ? '••••' + String(v).slice(-4) : '');
 const isMasked = (v) => typeof v === 'string' && v.startsWith('••••');
 
-function maskedConfig(provider, cfg) {
+// `table` lets other integrations (ad accounts) reuse the same masking/merging with their own field lists.
+function maskedConfig(provider, cfg, table = FIELDS) {
   const out = {};
-  for (const f of FIELDS[provider] || []) if (cfg[f.k] != null && cfg[f.k] !== '') out[f.k] = f.secret ? mask(cfg[f.k]) : cfg[f.k];
+  for (const f of table[provider] || []) if (cfg[f.k] != null && cfg[f.k] !== '') out[f.k] = f.secret ? mask(cfg[f.k]) : cfg[f.k];
   return out;
 }
 
 // Applies an update from the panel: masked/empty secret values keep what is stored.
-function mergeConfig(provider, oldCfg, incoming = {}) {
+function mergeConfig(provider, oldCfg, incoming = {}, table = FIELDS) {
   const out = {};
-  for (const f of FIELDS[provider] || []) {
+  for (const f of table[provider] || []) {
     const v = incoming[f.k];
     if (f.secret && (v === undefined || isMasked(v) || v === '')) { if (oldCfg[f.k]) out[f.k] = oldCfg[f.k]; continue; }
     if (v !== undefined && v !== '') out[f.k] = String(v).slice(0, 4000);
   }
   if (out.headers) { try { JSON.parse(out.headers); } catch { throw Object.assign(new Error('headers must be valid JSON'), { status: 400 }); } }
-  const missing = (FIELDS[provider] || []).filter((f) => f.req && !out[f.k]).map((f) => f.label);
+  const missing = (table[provider] || []).filter((f) => f.req && !out[f.k]).map((f) => f.label);
   if (missing.length) throw Object.assign(new Error(`Missing: ${missing.join(', ')}`), { status: 400 });
   return out;
 }
@@ -166,7 +167,7 @@ async function sendMessage(prov, channel, to, body, opts = {}) {
       msg.type = 'text';
       msg.text = { body, preview_url: true };
     }
-    const r = await post(`https://graph.facebook.com/${cfg.apiVersion || 'v21.0'}/${cfg.phoneNumberId}/messages`, { headers: { Authorization: `Bearer ${cfg.accessToken}` }, json: msg });
+    const r = await post(`https://graph.facebook.com/${cfg.apiVersion || config.metaGraphVersion}/${cfg.phoneNumberId}/messages`, { headers: { Authorization: `Bearer ${cfg.accessToken}` }, json: msg });
     return { status: 'sent', providerId: r.messages?.[0]?.id };
   }
   if (prov.type === 'http') {

@@ -3,6 +3,7 @@ const automation = require('./automation');
 const campaigns = require('./campaigns');
 const bulk = require('./bulk');
 const ai = require('./ai');
+const adsync = require('./adsync');
 const { emit, notify, logActivity } = require('./events');
 
 const INACTIVE_DAYS = 30;
@@ -55,7 +56,7 @@ async function dateEvents() {
 }
 
 async function tick() {
-  for (const job of [automation.resumeDue, campaigns.processDue, bulk.processDue, overdueAndReminders, inactiveCustomers, dateEvents]) {
+  for (const job of [automation.resumeDue, campaigns.processDue, bulk.processDue, overdueAndReminders, inactiveCustomers, dateEvents, adsync.processDue]) {
     try { await job(); } catch (e) { console.error(`[scheduler:${job.name}]`, e.message); }
   }
 }

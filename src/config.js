@@ -32,6 +32,16 @@ module.exports = {
     smsFrom: env.TWILIO_SMS_FROM,
     waFrom: env.TWILIO_WHATSAPP_FROM || 'whatsapp:+14155238886',
   },
+  // Ad network APIs (Ads > Ad accounts > Connect API). Google values here are the defaults for every company;
+  // a company can override them on its account. The OAuth client lets companies connect with "Sign in with Google".
+  googleAds: {
+    developerToken: env.GOOGLE_ADS_DEVELOPER_TOKEN,
+    clientId: env.GOOGLE_ADS_CLIENT_ID,
+    clientSecret: env.GOOGLE_ADS_CLIENT_SECRET,
+    loginCustomerId: env.GOOGLE_ADS_LOGIN_CUSTOMER_ID,
+    apiVersion: env.GOOGLE_ADS_API_VERSION || 'v26',
+  },
+  metaGraphVersion: env.META_GRAPH_VERSION || 'v23.0',
   webhookSecret: env.WEBHOOK_SECRET || 'dev-webhook-secret',
   // Public base URL of this server (https://crm.example.com). Needed for outbound IVR calls and delivery callbacks.
   publicUrl: (env.PUBLIC_URL || '').replace(/\/+$/, ''),

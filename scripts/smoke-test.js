@@ -2,6 +2,11 @@
 process.env.NODE_ENV = 'test';
 process.env.SCHEDULER_ENABLED = 'false';
 process.env.WEBHOOK_SECRET = 'dev-webhook-secret';
+// Ad network calls are answered by a fake fetch below; never use real credentials from .env.
+process.env.GOOGLE_ADS_DEVELOPER_TOKEN = 'test-dev-token';
+process.env.GOOGLE_ADS_CLIENT_ID = 'test-client';
+process.env.GOOGLE_ADS_CLIENT_SECRET = 'test-secret';
+process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID = '';
 
 const assert = require('assert');
 const mongoose = require('mongoose');
@@ -180,6 +185,29 @@ async function waitFor(fn, ms = 8000) {
     assert.equal((await fetch(`${base}/api/webhooks/form/bad`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
   });
 
+  await test('JustDial lead push: GET and POST, RECEIVED reply, dedupe by leadid and phone', async () => {
+    const q = new URLSearchParams({ leadid: 'JD-1001', leadtype: 'company', prefix: 'Mr', name: 'Ravi Kumar', mobile: '9876500011', email: 'Ravi@jd.test', category: 'Interior Designers', city: 'Pune', area: 'Baner', date: '2026-10-23', time: '10:15' });
+    let r = await fetch(`${base}/api/webhooks/justdial/${apiKey}?${q}`);
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), 'RECEIVED');
+    const leads = (await call('GET', '/api/leads?q=Ravi Kumar', null, admin)).body.data;
+    assert.equal(leads.length, 1);
+    const l = leads[0];
+    assert.deepEqual([l.name, l.phone, l.email, l.source], ['Mr Ravi Kumar', '+919876500011', 'ravi@jd.test', 'justdial']);
+    assert.equal(l.customFields.justdial.category, 'Interior Designers');
+    assert(l.tags.includes('justdial'));
+    // JustDial retries the same lead: ignored.
+    assert.equal(await (await fetch(`${base}/api/webhooks/justdial/${apiKey}?${q}`)).text(), 'RECEIVED');
+    // New enquiry from the same number as a form POST: note on the existing lead, no duplicate.
+    r = await fetch(`${base}/api/webhooks/justdial/${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'leadid=JD-1002&name=Ravi&mobile=09876500011&category=Modular+Kitchen&city=Pune' });
+    assert.equal(await r.text(), 'RECEIVED');
+    const again = (await call('GET', '/api/leads?q=Ravi', null, admin)).body.data;
+    assert.equal(again.length, 1);
+    assert(again[0].notes.some((n) => n.text.includes('Modular Kitchen')));
+    assert.equal((await call('POST', `/api/webhooks/justdial/${apiKey}`, { leadid: 'x', name: 'No phone' })).status, 400);
+    assert.equal((await fetch(`${base}/api/webhooks/justdial/wrong-key?mobile=9876500012`)).status, 401);
+  });
+
   await test('campaign: drip enrolls audience and sends step 1', async () => {
     const c = await call('POST', '/api/campaigns', {
       name: 'Nurture', channel: 'email', audience: { model: 'Lead', filter: { source: 'import' } },
@@ -288,6 +316,166 @@ async function waitFor(fn, ms = 8000) {
     const cl = await call('POST', `/api/ads/campaigns/${camp._id}/clone`, {}, adsTok);
     assert.equal(cl.status, 201);
     assert.notEqual(cl.body.utm.campaign, camp.utm.campaign);
+  });
+
+  await test('ads API sync: Google + Meta pull campaigns and metrics, push pause/budget, auto-pause, secrets masked', async () => {
+    const realFetch = global.fetch;
+    const today = new Date().toISOString().slice(0, 10);
+    const sent = [];
+    let gStatus = 'ENABLED';
+    const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
+    global.fetch = async (url, opt = {}) => {
+      const u = String(url);
+      if (u.startsWith('https://oauth2.googleapis.com/token')) return reply({ access_token: 'ya29.test', expires_in: 3600 });
+      if (u.startsWith('https://googleads.googleapis.com/')) {
+        sent.push({ u, h: opt.headers, b: opt.body && JSON.parse(opt.body) });
+        if (u.endsWith('/googleAds:searchStream')) {
+          const q = JSON.parse(opt.body).query;
+          if (q.includes('FROM customer')) return reply([{ results: [{ customer: { id: '1234567890' } }] }]);
+          if (q.includes('segments.date')) return reply([{ results: [{ campaign: { id: '111' }, segments: { date: today }, metrics: { impressions: '2000', clicks: '80', costMicros: '1500000000', conversions: 3.4, conversionsValue: 9000 } }] }]);
+          return reply([{ results: [
+            { campaign: { id: '111', name: 'G Search', status: gStatus, campaignBudget: 'customers/1234567890/campaignBudgets/9' }, campaignBudget: { amountMicros: '2500000000' } },
+            { campaign: { id: '222', name: 'Old removed', status: 'REMOVED', campaignBudget: 'customers/1234567890/campaignBudgets/8' }, campaignBudget: { amountMicros: '1000000' } },
+          ] }]);
+        }
+        return reply({ results: [{}] }); // mutate
+      }
+      if (u.startsWith('https://graph.facebook.com/')) {
+        sent.push({ u, h: opt.headers, b: opt.body && String(opt.body), m: opt.method });
+        if (u.includes('/act_555?')) return reply({ name: 'Meta acc', currency: 'INR' });
+        if (u.includes('/act_555/campaigns')) return reply({ data: [{ id: '777', name: 'FB Leads', status: 'ACTIVE', daily_budget: '200000', objective: 'OUTCOME_LEADS' }] });
+        if (u.includes('/act_555/insights')) return reply({ data: [{ campaign_id: '777', date_start: today, impressions: '5000', clicks: '100', spend: '3000.50', actions: [{ action_type: 'lead', value: '0' }, { action_type: 'onsite_conversion.lead_grouped', value: '0' }] }] });
+        if ((opt.method || 'GET') === 'POST') return reply({ success: true });
+        return reply({ error: { message: 'unexpected ' + u } }, 400);
+      }
+      return realFetch(url, opt);
+    };
+    try {
+      const g = (await call('POST', '/api/ads/accounts', { platform: 'google', name: 'G API', accountId: '123-456-7890', currency: 'INR', credentials: 'x', connected: true }, admin)).body;
+      assert.equal(g.connected, false, 'cannot fake a connection through plain CRUD');
+      assert.equal((await call('POST', `/api/ads/accounts/${g._id}/sync`, {}, admin)).status, 400, 'not connected yet');
+      assert.equal((await call('PUT', `/api/ads/accounts/${g._id}/connection`, { config: {} }, admin)).status, 400, 'refresh token required');
+      let con = (await call('PUT', `/api/ads/accounts/${g._id}/connection`, { config: { refreshToken: '1//refresh-secret-token' }, autoSync: true }, admin)).body;
+      assert.equal(con.connected, true);
+      assert(!con.lastSyncError, con.lastSyncError);
+      assert.equal(con.config.refreshToken, '••••oken', 'secret masked');
+      assert(!JSON.stringify((await call('GET', '/api/ads/accounts?limit=100', null, admin)).body).includes('refresh-secret'));
+      assert.equal(sent.at(-1).h['developer-token'], 'test-dev-token', 'server default developer token used');
+      assert(sent.at(-1).u.includes('/customers/1234567890/'), 'dashes stripped from customer ID');
+      // Saving again with the masked value keeps the stored token.
+      con = (await call('PUT', `/api/ads/accounts/${g._id}/connection`, { config: { refreshToken: '••••oken', loginCustomerId: '999-000-1111' } }, admin)).body;
+      assert.equal(con.config.loginCustomerId, '999-000-1111');
+
+      let s = (await call('POST', `/api/ads/accounts/${g._id}/sync`, { days: 7 }, admin)).body;
+      assert.deepEqual([s.campaignsCreated, s.metricRows], [1, 1], JSON.stringify(s));
+      assert.equal(sent.at(-1).h['login-customer-id'], '9990001111');
+      const gc = (await call('GET', `/api/ads/campaigns?account=${g._id}`, null, admin)).body.data;
+      assert.equal(gc.length, 1, 'removed campaigns are not imported');
+      assert.deepEqual([gc[0].name, gc[0].status, gc[0].dailyBudget, gc[0].externalId], ['G Search', 'active', 2500, '111']);
+      const perf = (await call('GET', `/api/ads/campaigns/${gc[0]._id}/performance?days=7`, null, admin)).body;
+      assert.deepEqual([perf.totals.spend, perf.totals.impressions, perf.totals.leads], [1500, 2000, 3], 'cost micros -> currency, conversions -> leads');
+      s = (await call('POST', `/api/ads/accounts/${g._id}/sync`, { days: 7 }, admin)).body;
+      assert.deepEqual([s.campaignsCreated, s.campaignsUpdated], [0, 1], 'second sync updates, no duplicates');
+
+      // CRM actions go to Google first.
+      sent.length = 0;
+      assert.equal((await call('POST', `/api/ads/campaigns/${gc[0]._id}/pause`, {}, admin)).body.status, 'paused');
+      assert(sent[0].u.endsWith('/campaigns:mutate') && sent[0].b.operations[0].update.status === 'PAUSED');
+      assert.equal((await call('PATCH', `/api/ads/campaigns/${gc[0]._id}`, { dailyBudget: 3000 }, admin)).status, 200);
+      assert.equal(sent.at(-1).b.operations[0].update.amountMicros, '3000000000');
+      assert.equal(sent.at(-1).b.operations[0].update.resourceName, 'customers/1234567890/campaignBudgets/9');
+      gStatus = 'PAUSED';
+
+      // A refused change is not applied in the CRM.
+      const failing = global.fetch;
+      global.fetch = async (url, opt) => (String(url).endsWith('/campaigns:mutate') ? reply({ error: { message: 'bad', details: [{ errors: [{ message: 'Campaign is not editable' }] }] } }, 400) : failing(url, opt));
+      const refused = await call('POST', `/api/ads/campaigns/${gc[0]._id}/resume`, {}, admin);
+      global.fetch = failing;
+      assert.equal(refused.status, 424);
+      assert(refused.body.error.includes('Campaign is not editable'), refused.body.error);
+      assert.equal((await call('GET', `/api/ads/campaigns/${gc[0]._id}`, null, admin)).body.status, 'paused');
+
+      // Meta: no leads after real spend -> auto-pause pushes PAUSED to Meta.
+      const m = (await call('POST', '/api/ads/accounts', { platform: 'meta', name: 'Meta API', accountId: 'act_555', currency: 'INR' }, admin)).body;
+      con = (await call('PUT', `/api/ads/accounts/${m._id}/connection`, { config: { accessToken: 'EAAtest' }, autoPause: true }, admin)).body;
+      assert(con.connected && !con.lastSyncError, con.lastSyncError);
+      sent.length = 0;
+      s = (await call('POST', `/api/ads/accounts/${m._id}/sync`, {}, admin)).body;
+      assert.equal(s.campaignsCreated, 1);
+      assert.equal(s.autoPaused, 1, JSON.stringify(s));
+      assert.equal(sent[0].h.Authorization, 'Bearer EAAtest', 'token in header, not in the URL');
+      assert(!sent.some((x) => x.u.includes('EAAtest')));
+      assert(sent.some((x) => x.u.endsWith('/777') && x.m === 'POST' && x.b.includes('status=PAUSED')));
+      const mc = (await call('GET', `/api/ads/campaigns?account=${m._id}`, null, admin)).body.data[0];
+      assert.deepEqual([mc.status, mc.dailyBudget, mc.objective], ['paused', 2000, 'leads'], 'paise -> rupees');
+
+      // Disconnect keeps data; Google sign-in needs server OAuth + PUBLIC_URL.
+      assert.equal((await call('DELETE', `/api/ads/accounts/${m._id}/connection`, null, admin)).body.connected, false);
+      assert.equal((await call('GET', `/api/ads/accounts/${g._id}/google-signin`, null, admin)).status, 400);
+      assert.equal((await call('GET', '/api/oauth/google-ads/callback?state=bad&code=x')).status, 400);
+    } finally { global.fetch = realFetch; }
+  });
+
+  await test('ads automation: workflow templates pause high-CPL campaigns, scale winners, react to no leads', async () => {
+    const meta = (await call('GET', '/api/workflows/meta', null, admin)).body;
+    assert(meta.events.includes('ad.performance_updated') && meta.stepTypes.includes('ad_set_budget'));
+    const install = async (name) => {
+      const i = meta.templates.findIndex((t) => t.name === name);
+      assert(i >= 0, name);
+      const wf = (await call('POST', `/api/workflows/from-template/${i}`, null, admin)).body;
+      assert.equal((await call('POST', `/api/workflows/${wf._id}/toggle`, null, admin)).body.active, true);
+      return wf;
+    };
+    const highCpl = await install('Ads: pause when cost per lead is too high');
+    const winners = await install('Ads: scale winners by 20% (capped)');
+    const noLeads = await install('Ads: spending with no leads');
+
+    const acc = (await call('POST', '/api/ads/accounts', { platform: 'other', name: 'Manual acc' }, admin)).body;
+    const mk = async (name, dailyBudget) => {
+      const c = (await call('POST', '/api/ads/campaigns', { account: acc._id, name, dailyBudget, objective: 'leads' }, admin)).body;
+      assert.equal((await call('POST', `/api/ads/campaigns/${c._id}/launch`, {}, admin)).body.status, 'active');
+      return c;
+    };
+    const today = new Date().toISOString().slice(0, 10);
+    const pricey = await mk('Pricey', 1000), star = await mk('Star', 2000), dud = await mk('Dud', 1000);
+
+    // CPL 1000 (> 800) on 4 leads -> paused by the workflow, managers notified.
+    await call('POST', '/api/ads/metrics', { campaign: pricey._id, date: today, impressions: 9000, clicks: 300, spend: 4000, leads: 4 }, admin);
+    assert.equal((await call('GET', `/api/ads/campaigns/${pricey._id}`, null, admin)).body.status, 'paused');
+    const runs = (await call('GET', `/api/workflows/${highCpl._id}/runs`, null, admin)).body;
+    assert.equal(runs[0].status, 'completed', JSON.stringify(runs[0]));
+    assert(runs[0].log.some((l) => l.step === 'ad_pause' && l.ok));
+    const notes = (await call('GET', '/api/notifications', null, admin)).body.data;
+    assert(notes.some((n) => n.title === 'Paused Pricey' && n.body.includes('1000')), 'payload rendered in the message');
+
+    // ROAS 4x on 2500 spend -> budget +20% (2000 -> 2400).
+    await call('POST', '/api/ads/metrics', { campaign: star._id, date: today, impressions: 9000, clicks: 300, spend: 2500, leads: 10, revenue: 10000 }, admin);
+    assert.equal((await call('GET', `/api/ads/campaigns/${star._id}`, null, admin)).body.dailyBudget, 2400);
+    // ...but never above the template cap of 5000 / the approval limit.
+    await call('PATCH', `/api/ads/campaigns/${star._id}`, { dailyBudget: 4800 }, admin);
+    const r = (await call('POST', `/api/ads/campaigns/${star._id}/run-automation`, null, admin)).body;
+    assert.equal(r.campaign.dailyBudget, 5000, '4800 * 1.2 is capped at the template max');
+    assert(r.runs.some((w) => w.log.some((l) => l.includes('4800 -> 5000'))), JSON.stringify(r.runs));
+    // A step asking for more than the approval limit fails instead of spending.
+    const big = (await call('POST', '/api/workflows', { name: 'too big', active: false, trigger: { event: 'ad.performance_updated' }, steps: [{ type: 'ad_set_budget', value: 9000 }] }, admin)).body;
+    const run = (await call('POST', `/api/workflows/${big._id}/test`, { kind: 'AdCampaign', id: star._id }, admin)).body[0];
+    assert.equal(run.status, 'failed');
+    assert(/approval limit/.test(run.error), run.error);
+    assert.equal((await call('GET', `/api/ads/campaigns/${star._id}`, null, admin)).body.dailyBudget, 5000);
+    await call('DELETE', `/api/workflows/${big._id}`, null, admin);
+    assert.equal(r.stats.roas, 4);
+
+    // Spend with no leads -> ad.no_leads workflow pauses it; the event fires once a day, not on every update.
+    await call('POST', '/api/ads/metrics', { campaign: dud._id, date: today, impressions: 9000, clicks: 300, spend: 5000, leads: 0 }, admin);
+    assert.equal((await call('GET', `/api/ads/campaigns/${dud._id}`, null, admin)).body.status, 'paused');
+    assert.equal((await call('GET', `/api/workflows/${noLeads._id}/runs`, null, admin)).body.length, 1);
+
+    // Manual test run on a campaign uses its real numbers.
+    const t = (await call('POST', `/api/workflows/${winners._id}/test`, { kind: 'AdCampaign', id: star._id }, admin)).body;
+    assert(Array.isArray(t));
+    assert.equal((await call('POST', `/api/workflows/${winners._id}/test`, { kind: 'AdCampaign', id: '0123456789abcdef01234567' }, admin)).status, 404);
+
+    for (const wf of [highCpl, winners, noLeads]) await call('DELETE', `/api/workflows/${wf._id}`, null, admin);
   });
 
   await test('hr: employees, punching, attendance, leave, payroll, self-service, RBAC', async () => {

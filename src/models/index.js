@@ -256,6 +256,7 @@ const WorkflowRun = make(
     branches: { type: [String], default: [] },
     resumeAt: Date,
     startedAtMs: Number,
+    payload: Mixed, // event data (e.g. ad KPIs) so step conditions and templates can use payload.*
     log: [{ step: String, ok: Boolean, detail: String, at: { type: Date, default: Date.now } }],
     error: String,
   },
@@ -312,6 +313,13 @@ const AdAccount = make('AdAccount', {
   currency: { type: String, default: 'INR' },
   monthlyBudget: { type: Number, default: 0 },
   status: { type: String, enum: ['active', 'paused', 'disconnected'], default: 'active' },
+  // Ad network API connection (services/adsync.js). Credentials are an encrypted JSON blob.
+  credentials: { type: String, select: false },
+  connected: { type: Boolean, default: false },
+  autoSync: { type: Boolean, default: true },
+  autoPause: { type: Boolean, default: false }, // pause lead campaigns that spend with no leads
+  lastSyncAt: Date,
+  lastSyncError: String,
 });
 
 const AdCampaign = make('AdCampaign', {
@@ -331,7 +339,10 @@ const AdCampaign = make('AdCampaign', {
   notes: String,
   owner: { type: ObjectId, ref: 'User' },
   approvalNote: String,
-}, (s) => s.index({ company: 1, 'utm.campaign': 1 }));
+  externalId: String, // campaign id on the ad network; set = linked, status/budget changes are pushed there
+  externalBudgetId: String, // Google Ads campaign budget resource name
+  syncError: String,
+}, (s) => s.index({ company: 1, 'utm.campaign': 1 }).index({ company: 1, account: 1, externalId: 1 }));
 
 const AdCreative = make('AdCreative', {
   ...scoped,
