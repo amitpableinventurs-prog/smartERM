@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node scripts/smoke-test.js",
+    "test:ai": "node scripts/ai-live-test.js",
     "seed": "node scripts/seed.js",
     "seed:hub": "node scripts/seed-hub-only.js",
     "owner:create": "node scripts/create-owner.js",

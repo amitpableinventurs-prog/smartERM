@@ -7,6 +7,12 @@ process.env.GOOGLE_ADS_DEVELOPER_TOKEN = 'test-dev-token';
 process.env.GOOGLE_ADS_CLIENT_ID = 'test-client';
 process.env.GOOGLE_ADS_CLIENT_SECRET = 'test-secret';
 process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID = '';
+// Messages stay simulated and the AI uses its built-in rules, so the run is deterministic and sends nothing real.
+// Live AI flows are covered by scripts/ai-live-test.js.
+process.env.TWILIO_ACCOUNT_SID = '';
+process.env.SMTP_HOST = '';
+process.env.OPENAI_API_KEY = '';
+process.env.GEMINI_API_KEY = '';
 
 const assert = require('assert');
 const mongoose = require('mongoose');
