@@ -42,6 +42,9 @@ module.exports = {
     apiVersion: env.GOOGLE_ADS_API_VERSION || 'v26',
   },
   metaGraphVersion: env.META_GRAPH_VERSION || 'v23.0',
+  // Meta app for "Connect with Facebook" (Ads > Ad accounts). LOGIN_CONFIG_ID = a Facebook Login for Business
+  // configuration that issues system-user tokens, which never expire; without it tokens last 60 days.
+  metaApp: { appId: env.META_APP_ID, appSecret: env.META_APP_SECRET, loginConfigId: env.META_LOGIN_CONFIG_ID },
   webhookSecret: env.WEBHOOK_SECRET || 'dev-webhook-secret',
   // Public base URL of this server (https://crm.example.com). Needed for outbound IVR calls and delivery callbacks.
   publicUrl: (env.PUBLIC_URL || '').replace(/\/+$/, ''),

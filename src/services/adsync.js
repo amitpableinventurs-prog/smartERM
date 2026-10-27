@@ -91,9 +91,9 @@ async function call(url, { method = 'GET', headers = {}, json, form } = {}) {
   return data;
 }
 
-async function notifyApprovers(company, title, body, id) {
+async function notifyApprovers(company, title, body, id, kind = 'AdCampaign') {
   const users = await M.User.find({ company, active: true, role: { $in: APPROVER_ROLES } }).select('_id');
-  await Promise.all(users.map((u) => notify(company, u._id, title, body, { kind: 'AdCampaign', id })));
+  await Promise.all(users.map((u) => notify(company, u._id, title, body, { kind, id })));
 }
 
 // ---------- Google Ads ----------
@@ -251,12 +251,19 @@ function connectionView(acc) {
     platform: acc.platform, supported: SUPPORTED.includes(acc.platform), connected: !!acc.connected,
     autoSync: acc.autoSync, autoPause: acc.autoPause, lastSyncAt: acc.lastSyncAt, lastSyncError: acc.lastSyncError,
     leadForms: !!NETWORKS[acc.platform]?.pullLeads, lastLeadSyncAt: acc.lastLeadSyncAt, leadSyncError: acc.leadSyncError,
+    tokenExpiresAt: acc.tokenExpiresAt,
     config: maskedConfig(acc.platform, cfg, FIELDS), fields: FIELDS[acc.platform] || [],
-    serverDefaults: acc.platform === 'google' && {
+    serverDefaults: acc.platform === 'google' ? {
       developerToken: !!config.googleAds.developerToken, oauthClient: !!(config.googleAds.clientId && config.googleAds.clientSecret),
-      signIn: !!(config.googleAds.clientId && config.googleAds.clientSecret && config.publicUrl),
-    },
+      signIn: signInReady('google'),
+    } : acc.platform === 'meta' ? { signIn: signInReady('meta') } : undefined,
   };
+}
+
+// One-click sign-in needs the server's OAuth app and a public address for the callback.
+function signInReady(platform) {
+  const app = platform === 'google' ? { id: config.googleAds.clientId, secret: config.googleAds.clientSecret } : { id: config.metaApp.appId, secret: config.metaApp.appSecret };
+  return !!(app.id && app.secret && config.publicUrl);
 }
 
 async function saveConnection(acc, { config: incoming, autoSync, autoPause } = {}) {
@@ -288,7 +295,81 @@ function disconnect(acc) {
   acc.credentials = undefined;
   acc.connected = false;
   acc.lastSyncError = undefined;
+  acc.tokenExpiresAt = undefined;
   return acc.save();
+}
+
+// ---------- one-click connection (Google / Facebook sign-in, routes/oauth.js) ----------
+const MAX_DISCOVERED = 25;
+const fmtCid = (id) => digits(id).replace(/^(\d{3})(\d{3})(\d{4})$/, '$1-$2-$3');
+const META_CLOSED = [2, 100, 101]; // disabled, pending closure, closed
+
+// Every Google Ads client account the signed-in user can reach, directly or through a manager (MCC) account.
+async function googleDiscover(refreshToken) {
+  const c = googleCfg({ refreshToken });
+  if (!c.developerToken) throw new Error('Google Ads developer token missing (GOOGLE_ADS_DEVELOPER_TOKEN)');
+  const base = `https://googleads.googleapis.com/${config.googleAds.apiVersion}`;
+  const headers = { Authorization: `Bearer ${await googleToken(c)}`, 'developer-token': c.developerToken };
+  const { resourceNames = [] } = await call(`${base}/customers:listAccessibleCustomers`, { headers });
+  const query = 'SELECT customer_client.id, customer_client.descriptive_name, customer_client.currency_code, customer_client.manager, customer_client.status FROM customer_client WHERE customer_client.level <= 1';
+  const found = new Map();
+  for (const rn of resourceNames.slice(0, 50)) {
+    const root = digits(rn);
+    let rows;
+    try {
+      rows = (await call(`${base}/customers/${root}/googleAds:searchStream`, { method: 'POST', headers: { ...headers, 'login-customer-id': root }, json: { query } })).flatMap((b) => b.results || []);
+    } catch { continue; } // cancelled or not-yet-enabled accounts
+    for (const { customerClient: x } of rows) {
+      const id = String(x.id);
+      if (x.manager || (x.status && x.status !== 'ENABLED') || found.has(id)) continue;
+      // Always store the route (manager, or the account itself), so the server-wide GOOGLE_ADS_LOGIN_CUSTOMER_ID default can't misroute it.
+      found.set(id, { accountId: fmtCid(id), name: x.descriptiveName || `Google Ads ${fmtCid(id)}`, currency: x.currencyCode, cfg: { refreshToken, loginCustomerId: fmtCid(root) } });
+    }
+  }
+  return [...found.values()];
+}
+
+// Every Meta ad account the token can use (personal and Business Manager ones).
+async function metaDiscover(accessToken) {
+  const rows = await metaList({ accessToken }, graph('me/adaccounts?fields=account_id,name,currency,account_status&limit=200'), 5);
+  return rows.filter((a) => !META_CLOSED.includes(a.account_status))
+    .map((a) => ({ accountId: `act_${a.account_id}`, name: a.name || `Meta ad account ${a.account_id}`, currency: a.currency, cfg: { accessToken } }));
+}
+
+// Saves the accounts a sign-in can reach: existing ones (matched by ID) get the new credentials, missing ones are added.
+// The account the user started from takes the first unclaimed discovered account when its own ID is not reachable
+// (e.g. demo data or a typo). Every connected account starts its first sync right away.
+async function connectDiscovered(company, platform, startId, found, { tokenExpiresAt, syncNow = true } = {}) {
+  const label = platform === 'google' ? 'Google Ads' : 'Meta';
+  if (!found.length) throw Object.assign(new Error(`This login has no active ${label} ad accounts`), { status: 400 });
+  const existing = await M.AdAccount.find({ company, platform }).select('+credentials');
+  const byKey = new Map(existing.filter((a) => digits(a.accountId)).map((a) => [digits(a.accountId), a]));
+  const start = startId && existing.find((a) => String(a._id) === String(startId));
+  if (start && !found.some((f) => digits(f.accountId) === digits(start.accountId))) {
+    const free = found.find((f) => !byKey.has(digits(f.accountId)));
+    if (free) { byKey.delete(digits(start.accountId)); start.accountId = free.accountId; byKey.set(digits(free.accountId), start); }
+  }
+  const out = [];
+  for (const f of found.slice(0, MAX_DISCOVERED)) {
+    const acc = byKey.get(digits(f.accountId)) || new M.AdAccount({ company, platform, name: f.name, accountId: f.accountId, currency: f.currency || 'INR' });
+    if (f.currency) acc.currency = f.currency;
+    // Keep a company's own Google developer token; the sign-in itself uses the server OAuth client.
+    const { developerToken } = unseal(acc.credentials);
+    acc.credentials = seal({ ...(developerToken && { developerToken }), ...f.cfg });
+    acc.connected = true;
+    if (acc.status === 'disconnected') acc.status = 'active';
+    acc.tokenExpiresAt = tokenExpiresAt;
+    acc.tokenWarnedAt = undefined;
+    acc.lastSyncError = undefined;
+    acc.lastSyncAt = undefined; // the scheduler picks it up even if the immediate sync below fails
+    await acc.save();
+    await logActivity(company, { kind: 'AdAccount', id: acc._id }, 'ads.connected', `${acc.name} connected by ${label} sign-in`);
+    out.push(acc);
+  }
+  if (syncNow) setImmediate(async () => {
+    for (const a of out) await syncAccount(a, { days: 30 }).catch((e) => console.error(`[adsync first sync ${a._id}]`, e.message));
+  });
+  return out;
 }
 
 // ---------- pull ----------
@@ -521,7 +602,19 @@ async function pauseFor(c, note, message) {
 }
 
 // ---------- scheduler ----------
+// Sign-in tokens that expire (60-day Facebook user tokens): one reminder a week before, so sync never just stops.
+async function warnExpiringTokens() {
+  const soon = await M.AdAccount.find({ connected: true, tokenExpiresAt: { $lt: new Date(Date.now() + 7 * 864e5) }, tokenWarnedAt: null }).limit(50);
+  for (const a of soon) {
+    a.tokenWarnedAt = new Date();
+    await a.save();
+    const who = a.platform === 'meta' ? 'Facebook' : 'Google';
+    await notifyApprovers(a.company, `Reconnect ${a.name}`, `The ${who} login for ${a.name} expires on ${ymd(a.tokenExpiresAt)}. Open Ads > Ad accounts and click "Connect with ${who}" again.`, a._id, 'AdAccount');
+  }
+}
+
 async function processDue() {
+  await warnExpiringTokens();
   const due = await M.AdAccount.find({
     connected: true, autoSync: true, status: 'active', platform: { $in: SUPPORTED },
     $or: [{ lastSyncAt: null }, { lastSyncAt: { $lt: new Date(Date.now() - SYNC_EVERY_MS) } }],
@@ -546,4 +639,5 @@ async function processDue() {
 module.exports = {
   FIELDS, SUPPORTED, trackingCode, wastingSpend, notifyApprovers, approvalLimit, kpis, SUMS, push, changeStatus, changeBudget,
   afterNewData, campaignStats, loadAccount, connectionView, saveConnection, storeGoogleToken, disconnect, syncAccount, syncLeads, processDue,
+  googleDiscover, metaDiscover, connectDiscovered, signInReady,
 };

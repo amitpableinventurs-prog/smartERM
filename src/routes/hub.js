@@ -127,7 +127,11 @@ router.put('/providers/:channel', authorize('hubsetup', 'u'), validate(z.object(
   res.json(providerView(req, channel, p));
 });
 
-router.post('/providers/:channel/test', authorize('hubsetup', 'u'), validate(z.object({ to: z.string().min(6).max(30), body: z.string().max(500).optional() })), async (req, res) => {
+// WhatsApp `template` (approved template name, e.g. hello_world) reaches numbers that have not messaged you in the last 24h.
+router.post('/providers/:channel/test', authorize('hubsetup', 'u'), validate(z.object({
+  to: z.string().min(6).max(30), body: z.string().max(500).optional(),
+  template: z.string().max(120).optional(), language: z.string().max(20).optional(),
+})), async (req, res) => {
   const { channel } = req.params;
   if (!M.HUB_CHANNELS.includes(channel)) throw new HttpError(404, 'Unknown channel');
   const to = normalize(req.body.to);
@@ -138,11 +142,12 @@ router.post('/providers/:channel/test', authorize('hubsetup', 'u'), validate(z.o
       const r = await providers.placeCall(prov, to, { answerUrl: base && `${base}/voice?test=1` });
       return res.json({ ok: true, status: r.status, providerId: r.providerId, provider: prov.type });
     }
-    const m = await comm.send({ company: req.companyId, channel, to, body: req.body.body || `Test message from ${(await M.Company.findById(req.companyId)).name} CRM`, by: req.user._id });
+    const waTemplate = channel === 'whatsapp' && req.body.template ? { name: req.body.template, language: req.body.language || 'en_US' } : undefined;
+    const m = await comm.send({ company: req.companyId, channel, to, body: req.body.body || `Test message from ${(await M.Company.findById(req.companyId)).name} CRM`, by: req.user._id, waTemplate });
     res.json({ ok: true, status: m.status, providerId: m.providerId, provider: prov.type });
   } catch (e) {
     if (prov.doc) await M.ChannelProvider.updateOne({ _id: prov.doc._id }, { lastError: e.message.slice(0, 300) });
-    throw new HttpError(502, `Test failed: ${e.message}`);
+    throw new HttpError(424, `Test failed: ${e.message}`);
   }
 });
 
@@ -330,7 +335,7 @@ router.get('/conversations/:id', authorize('inbox', 'r'), async (req, res) => {
 router.post('/conversations/:id/reply', authorize('inbox', 'u'), validate(z.object({ body: z.string().min(1).max(4000) })), async (req, res) => {
   const c = await loadConv(req);
   try { res.status(201).json(await inbox.agentReply(c, req.user, req.body.body)); }
-  catch (e) { throw new HttpError(502, `Not delivered: ${e.message}`); }
+  catch (e) { throw new HttpError(424, `Not delivered: ${e.message}`); }
 });
 
 router.post('/conversations/:id/takeover', authorize('inbox', 'u'), async (req, res) => {
@@ -387,7 +392,7 @@ router.post('/conversations', authorize('inbox', 'u'), validate(z.object({
   );
   if (OWN_INBOX(req).assignedTo && conv.assignedTo && String(conv.assignedTo) !== String(req.user._id)) throw new HttpError(403, 'This number is handled by another agent');
   Object.assign(conv, { contact: contacts.ref(contact), name: contact?.doc.name || phone, status: 'open' });
-  try { await inbox.agentReply(conv, req.user, body); } catch (e) { throw new HttpError(502, `Not delivered: ${e.message}`); }
+  try { await inbox.agentReply(conv, req.user, body); } catch (e) { throw new HttpError(424, `Not delivered: ${e.message}`); }
   res.status(201).json(conv);
 });
 
@@ -458,7 +463,7 @@ router.post('/ivr/call', authorize('ivr', 'c'), validate(z.object({ flowId: oid,
   }
   contact ||= await ivr.mapContact(req.companyId, normalize(phone));
   try { res.status(201).json(await ivr.dial(req.companyId, flow, phone, { contact })); }
-  catch (e) { throw new HttpError(e.status || 502, e.message); }
+  catch (e) { throw new HttpError(e.status || 424, e.message); }
 });
 
 // ---- Call simulator: walk a flow in the browser, with real CRM mapping and intent actions ----

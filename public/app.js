@@ -730,10 +730,14 @@ MODULES.adaccounts = { title: 'Ad Accounts', render: async (root) => {
   });
   await listModule({
     res: 'ads', path: '/ads/accounts', title: 'Ad account', filterField: 'platform', filterOpts: PLATFORMS,
-    note: 'Google Ads and Meta accounts can be connected to their API: campaigns, spend and conversions sync every 3 hours, and Pause / Resume / budget changes in the CRM are applied on the ad network.',
+    note: 'Click "Connect with Facebook" or "Connect with Google": sign in once and every ad account you manage is added and synced automatically (campaigns and spend every 3 hours, lead forms every 10 minutes). Pause / Resume / budget changes in the CRM are applied on the ad network.',
+    barExtra: [
+      { label: 'Connect with Facebook', show: () => can('ads', 'u'), run: (reload) => adSignIn('meta', null, () => { reload(); loadSum(); }) },
+      { label: 'Connect with Google', show: () => can('ads', 'u'), run: (reload) => adSignIn('google', null, () => { reload(); loadSum(); }) },
+    ],
     cols: [{ k: 'name', who: true }, { k: 'platform', pill: true }, { k: 'accountId', label: 'Account ID' }, { k: 'currency' }, { k: 'monthlyBudget', label: 'Monthly budget', money: true }, { k: 'status', pill: true },
       { k: 'api', label: 'API sync' }],
-    rows: (rows) => rows.map((r) => ({ ...r, api: !API_PLATFORMS.includes(r.platform) ? '—' : !r.connected ? 'Not connected' : r.lastSyncError ? '⚠ ' + r.lastSyncError.slice(0, 60) : r.lastSyncAt ? 'Synced ' + fmtDate(r.lastSyncAt) : 'Connected' })),
+    rows: (rows) => rows.map((r) => ({ ...r, api: !API_PLATFORMS.includes(r.platform) ? '—' : !r.connected ? 'Not connected' : r.lastSyncError ? '⚠ ' + r.lastSyncError.slice(0, 60) : r.lastSyncAt ? 'Synced ' + fmtDate(r.lastSyncAt) : 'Connected · first sync running' })),
     fields: [{ k: 'platform', type: 'select', opts: PLATFORMS, req: true }, { k: 'name', req: true }, { k: 'accountId', label: 'Account ID (Google: customer ID 123-456-7890 · Meta: act_123…)' }, { k: 'currency' }, { k: 'monthlyBudget', type: 'number' }, { k: 'status', type: 'select', opts: ['active', 'paused', 'disconnected'] }],
     actions: [
       { label: 'Connect API', perm: ['ads', 'u'], show: (r) => API_PLATFORMS.includes(r.platform), run: (r, reload) => connectModal(r, () => { reload(); loadSum(); }) },
@@ -746,9 +750,24 @@ MODULES.adaccounts = { title: 'Ad Accounts', render: async (root) => {
 
 const API_PLATFORMS = ['google', 'meta'];
 const API_HELP = {
-  google: 'Account ID must be the Google Ads customer ID. Use "Sign in with Google", or paste a refresh token made with your OAuth client (OAuth Playground, scope https://www.googleapis.com/auth/adwords). If the account is managed through an MCC, enter the MCC ID.',
-  meta: 'Account ID must be the ad account ID (act_…). Create a System User in Meta Business Settings, assign it the ad account, and generate a token with ads_read and ads_management. Add leads_retrieval (and assign the Facebook Page to the system user) to import lead-form leads every 10 minutes. A WhatsApp token works too if it has those permissions.',
+  google: 'Easiest: "Connect with Google". Sign in and approve; every Google Ads account you can reach (also through a manager account) is added with its customer ID and starts syncing. Manual option below: a refresh token for the server OAuth client, plus the customer ID on the account.',
+  meta: 'Easiest: "Connect with Facebook". Log in and approve; every ad account you manage is added with its act_ ID and starts syncing, including lead-form leads. Manual option below: a System User token with ads_read, ads_management (and leads_retrieval for lead forms), plus the act_ ID on the account.',
 };
+const SIGNIN_NAME = { google: 'Google', meta: 'Facebook' };
+
+// One-click connect: opens the Google / Facebook consent page; the server adds the accounts and starts syncing.
+// Watches the account list and refreshes the page as soon as a connection lands (up to 5 minutes).
+async function adSignIn(platform, accountId, done) {
+  const { url } = await api(`/ads/accounts/signin/${platform}${accountId ? '?account=' + accountId : ''}`);
+  const snapshot = async () => (await api('/ads/accounts?limit=100&platform=' + platform)).data.filter((a) => a.connected).map((a) => a._id + (a.updatedAt || '')).sort().join();
+  if (!window.open(url, '_blank')) return location.assign(url); // popup blocked: continue in this tab
+  const before = await snapshot();
+  toast(`Finish in the ${SIGNIN_NAME[platform]} window. This page updates by itself.`);
+  for (let i = 0; i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if ((await snapshot().catch(() => before)) !== before) { toast(`${SIGNIN_NAME[platform]} ad accounts connected. First sync is running.`); return done(); }
+  }
+}
 
 // Ad network API credentials for one account. Secret values come back masked; leaving them unchanged keeps them.
 async function connectModal(acc, done) {
@@ -760,7 +779,9 @@ async function connectModal(acc, done) {
   const sd = c.serverDefaults;
   const body = h('div', {},
     h('p', { class: 'muted', style: 'margin:0' }, API_HELP[acc.platform]),
-    sd && h('p', { class: 'muted' }, `Server defaults: developer token ${sd.developerToken ? 'set' : 'NOT set'} · OAuth client ${sd.oauthClient ? 'set' : 'NOT set'}`),
+    sd && !sd.signIn && h('div', { class: 'warnbar' }, `One-click "Connect with ${SIGNIN_NAME[acc.platform]}" is off: the server needs ${acc.platform === 'google' ? 'GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET' : 'META_APP_ID, META_APP_SECRET'} and PUBLIC_URL in .env (then restart).`),
+    acc.platform === 'google' && sd && h('p', { class: 'muted' }, `Server defaults: developer token ${sd.developerToken ? 'set' : 'NOT set'} · OAuth client ${sd.oauthClient ? 'set' : 'NOT set'}`),
+    c.tokenExpiresAt && h('p', { class: 'muted' }, `Login valid until ${fmtDate(c.tokenExpiresAt)} (you will be reminded a week before).`),
     c.lastSyncError && h('div', { class: 'warnbar' }, 'Last error: ' + c.lastSyncError),
     c.leadForms && c.connected && h('p', { class: 'muted', style: 'margin:0' }, c.leadSyncError ? '' : `Lead forms: checked ${c.lastLeadSyncAt ? fmtDate(c.lastLeadSyncAt) : 'not yet'}`),
     c.leadForms && c.leadSyncError && h('div', { class: 'warnbar' }, 'Lead form import: ' + c.leadSyncError),
@@ -771,7 +792,7 @@ async function connectModal(acc, done) {
     const r = await api(`/ads/accounts/${acc._id}/connection`, { method: 'PUT', body: { config: f.values(), autoSync: sync.checked, autoPause: pause.checked } });
     toast(r.lastSyncError ? 'Saved, but the test failed: ' + r.lastSyncError : 'Connected. Press "Sync now" to import campaigns.', !!r.lastSyncError); done();
   } }];
-  if (sd?.signIn) buttons.unshift({ keep: true, cls: 'sec', label: 'Sign in with Google', run: async () => { window.open((await api(`/ads/accounts/${acc._id}/google-signin`)).url, '_blank'); toast('Finish in the Google window, then come back and press "Sync now".'); } });
+  if (sd?.signIn) buttons.unshift({ label: `Connect with ${SIGNIN_NAME[acc.platform]}`, run: () => { adSignIn(acc.platform, acc._id, done).catch((e) => toast(e.message, true)); } });
   if (c.connected) buttons.push({ cls: 'bad', label: 'Disconnect', run: async () => { if (!confirm('Remove the API credentials? Imported campaigns and data stay.')) return false; await api(`/ads/accounts/${acc._id}/connection`, { method: 'DELETE' }); toast('Disconnected'); done(); } });
   modal('Connect API — ' + acc.name, body, buttons, true);
 }

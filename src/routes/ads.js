@@ -26,7 +26,7 @@ const div = (a, b) => (b ? a / b : 0);
 const { kpis, SUMS, approvalLimit, notifyApprovers } = adsync;
 const isApprover = (req) => APPROVER_ROLES.includes(req.user.role);
 
-const API_FIELDS = ['credentials', 'connected', 'lastSyncAt', 'lastSyncError']; // only through /:id/connection
+const API_FIELDS = ['credentials', 'connected', 'lastSyncAt', 'lastSyncError', 'tokenExpiresAt', 'tokenWarnedAt']; // only through /:id/connection or sign-in
 
 // ---------------- Accounts ----------------
 const accounts = crud({
@@ -58,11 +58,15 @@ accounts.router.post('/:id/sync', authorize('ads', 'u'), async (req, res) => {
   res.json(await adsync.syncAccount(await account(req), { days }));
 });
 
-// "Sign in with Google": returns the consent URL; Google redirects to /api/oauth/google-ads/callback.
-accounts.router.get('/:id/google-signin', authorize('ads', 'u'), async (req, res) => {
-  const acc = await account(req);
-  if (acc.platform !== 'google') throw new HttpError(400, 'Not a Google Ads account');
-  res.json({ url: require('./oauth').googleConsentUrl(req.companyId, acc._id) });
+// One-click connect: returns the Google / Facebook consent URL. The callback (routes/oauth.js) adds every ad account
+// the login can reach and starts syncing. ?account=<id> = the account the user started from (it gets a real ID if needed).
+accounts.router.get('/signin/:platform', authorize('ads', 'u'), async (req, res) => {
+  let start;
+  if (req.query.account) {
+    start = await adsync.loadAccount(req.companyId, String(req.query.account));
+    if (start.platform !== req.params.platform) throw new HttpError(400, `"${start.name}" is not a ${req.params.platform} account`);
+  }
+  res.json({ url: require('./oauth').consentUrl(req.params.platform, req.companyId, start?._id) });
 });
 
 accounts.router.get('/summary', authorize('ads', 'r'), async (req, res) => {

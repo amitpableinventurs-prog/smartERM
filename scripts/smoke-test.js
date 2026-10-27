@@ -7,6 +7,9 @@ process.env.GOOGLE_ADS_DEVELOPER_TOKEN = 'test-dev-token';
 process.env.GOOGLE_ADS_CLIENT_ID = 'test-client';
 process.env.GOOGLE_ADS_CLIENT_SECRET = 'test-secret';
 process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID = '';
+process.env.META_APP_ID = 'test-meta-app';
+process.env.META_APP_SECRET = 'test-meta-secret';
+process.env.META_LOGIN_CONFIG_ID = '';
 // Messages stay simulated and the AI uses its built-in rules, so the run is deterministic and sends nothing real.
 // Live AI flows are covered by scripts/ai-live-test.js.
 process.env.TWILIO_ACCOUNT_SID = '';
@@ -426,11 +429,124 @@ async function waitFor(fn, ms = 8000) {
       assert.equal((await call('POST', `/api/ads/accounts/${m._id}/sync`, {}, admin)).body.leadsImported, 0, 'no duplicate on the next sync');
       assert((await call('GET', `/api/ads/accounts/${m._id}/connection`, null, admin)).body.lastLeadSyncAt);
 
-      // Disconnect keeps data; Google sign-in needs server OAuth + PUBLIC_URL.
+      // Disconnect keeps data; one-click sign-in needs the server OAuth app + PUBLIC_URL.
       assert.equal((await call('DELETE', `/api/ads/accounts/${m._id}/connection`, null, admin)).body.connected, false);
-      assert.equal((await call('GET', `/api/ads/accounts/${g._id}/google-signin`, null, admin)).status, 400);
+      const off = await call('GET', `/api/ads/accounts/signin/google?account=${g._id}`, null, admin);
+      assert.equal(off.status, 400);
+      assert(/PUBLIC_URL/.test(off.body.error), off.body.error);
       assert.equal((await call('GET', '/api/oauth/google-ads/callback?state=bad&code=x')).status, 400);
     } finally { global.fetch = realFetch; }
+  });
+
+  await test('ads one-click connect: Facebook and Google sign-in find ad accounts, save them and start syncing', async () => {
+    const config = require('../src/config');
+    const realFetch = global.fetch;
+    const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
+    const seen = [];
+    global.fetch = async (url, opt = {}) => {
+      const u = String(url);
+      if (u.startsWith('https://graph.facebook.com/')) {
+        seen.push(u);
+        if (u.includes('/oauth/access_token') && u.includes('code=fb-code')) return reply({ access_token: 'EAAshort', token_type: 'bearer', expires_in: 5000 });
+        if (u.includes('/oauth/access_token') && u.includes('fb_exchange_token=EAAshort')) return reply({ access_token: 'EAAlong', token_type: 'bearer', expires_in: 5184000 });
+        if (u.includes('/me/adaccounts')) return reply({ data: [
+          { account_id: '9001', name: 'Acme FB Main', currency: 'INR', account_status: 1 },
+          { account_id: '9002', name: 'Acme FB Promo', currency: 'USD', account_status: 1 },
+          { account_id: '9003', name: 'Closed one', currency: 'INR', account_status: 101 },
+        ] });
+        if (u.includes('/campaigns') || u.includes('/insights') || u.includes('/ads?') || u.includes('/leads')) return reply({ data: [] });
+        return reply({ error: { message: 'unexpected ' + u } }, 400);
+      }
+      if (u.startsWith('https://oauth2.googleapis.com/token')) {
+        const body = String(opt.body);
+        if (body.includes('grant_type=authorization_code')) return reply({ access_token: 'ya29.x', refresh_token: '1//google-refresh', expires_in: 3600 });
+        return reply({ access_token: 'ya29.y', expires_in: 3600 });
+      }
+      if (u.startsWith('https://googleads.googleapis.com/')) {
+        seen.push(u + ' login=' + (opt.headers || {})['login-customer-id']);
+        if (u.endsWith('/customers:listAccessibleCustomers')) return reply({ resourceNames: ['customers/4153881360'] });
+        if (u.includes('/customers/4153881360/googleAds:searchStream') && JSON.parse(opt.body).query.includes('customer_client')) {
+          return reply([{ results: [
+            { customerClient: { id: '4153881360', descriptiveName: 'Agency MCC', manager: true, status: 'ENABLED' } },
+            { customerClient: { id: '7778889990', descriptiveName: 'Client Shop', currencyCode: 'INR', manager: false, status: 'ENABLED' } },
+            { customerClient: { id: '1112223330', descriptiveName: 'Old client', manager: false, status: 'CANCELED' } },
+          ] }]);
+        }
+        return reply([{ results: [] }]);
+      }
+      return realFetch(url, opt);
+    };
+    const prevUrl = config.publicUrl;
+    config.publicUrl = 'http://crm.test';
+    const follow = async (url) => {
+      const st = new URL(url).searchParams.get('state');
+      return st;
+    };
+    try {
+      // The demo-style account with a made-up ID is the one the user starts from.
+      const demo = (await call('POST', '/api/ads/accounts', { platform: 'meta', name: 'Meta Ads – Demo', accountId: '644-783-2724' }, admin)).body;
+      const view = (await call('GET', `/api/ads/accounts/${demo._id}/connection`, null, admin)).body;
+      assert.equal(view.serverDefaults.signIn, true);
+      assert.equal((await call('GET', `/api/ads/accounts/signin/google?account=${demo._id}`, null, admin)).status, 400, 'platform must match');
+
+      const s1 = (await call('GET', `/api/ads/accounts/signin/meta?account=${demo._id}`, null, admin)).body;
+      const fbUrl = new URL(s1.url);
+      assert.equal(fbUrl.host, 'www.facebook.com');
+      assert.equal(fbUrl.searchParams.get('client_id'), 'test-meta-app');
+      assert.equal(fbUrl.searchParams.get('redirect_uri'), 'http://crm.test/api/oauth/meta/callback');
+      assert(fbUrl.searchParams.get('scope').includes('ads_management') && fbUrl.searchParams.get('scope').includes('leads_retrieval'));
+      const state = await follow(s1.url);
+      assert.equal((await fetch(`${base}/api/oauth/google-ads/callback?code=x&state=${state}`)).status, 400, 'a Facebook state cannot finish a Google login');
+
+      const page = await fetch(`${base}/api/oauth/meta/callback?code=fb-code&state=${state}`);
+      const html = await page.text();
+      assert.equal(page.status, 200, html);
+      assert(html.includes('2 ad accounts connected') && html.includes('Acme FB Promo'), html);
+      assert(seen.some((x) => x.includes('fb_exchange_token=EAAshort')), 'short token swapped for a 60-day one');
+      const metaAccs = (await call('GET', '/api/ads/accounts?platform=meta&limit=100', null, admin)).body.data;
+      const main = metaAccs.find((a) => a._id === demo._id);
+      assert.equal(main.accountId, 'act_9001', 'demo account took the first real account');
+      assert.equal(main.connected, true);
+      const promo = metaAccs.find((a) => a.accountId === 'act_9002');
+      assert(promo && promo.connected && promo.currency === 'USD');
+      assert(!metaAccs.some((a) => a.accountId === 'act_9003'), 'closed accounts are skipped');
+      const con = (await call('GET', `/api/ads/accounts/${demo._id}/connection`, null, admin)).body;
+      assert.equal(con.config.accessToken, '••••long');
+      assert(new Date(con.tokenExpiresAt) > new Date(Date.now() + 50 * 864e5));
+      assert(!JSON.stringify(metaAccs).includes('EAAlong'), 'token never sent to the browser');
+      // First sync starts by itself.
+      await waitFor(async () => (await call('GET', `/api/ads/accounts/${promo._id}/connection`, null, admin)).body.lastSyncAt);
+      // Signing in again updates the same records instead of adding duplicates.
+      const again = (await call('GET', '/api/ads/accounts/signin/meta', null, admin)).body;
+      assert.equal((await fetch(`${base}/api/oauth/meta/callback?code=fb-code&state=${await follow(again.url)}`)).status, 200);
+      assert.equal((await call('GET', '/api/ads/accounts?platform=meta&limit=100', null, admin)).body.data.filter((a) => /^act_900/.test(a.accountId)).length, 2);
+      await waitFor(async () => (await call('GET', `/api/ads/accounts/${promo._id}/connection`, null, admin)).body.lastSyncAt);
+
+      // Google: client accounts under the manager are found; the manager itself and cancelled ones are not added.
+      const gs = (await call('GET', '/api/ads/accounts/signin/google', null, admin)).body;
+      assert.equal(new URL(gs.url).searchParams.get('access_type'), 'offline');
+      const gpage = await fetch(`${base}/api/oauth/google-ads/callback?code=g-code&state=${await follow(gs.url)}`);
+      const ghtml = await gpage.text();
+      assert.equal(gpage.status, 200, ghtml);
+      assert(ghtml.includes('1 ad account connected: Client Shop'), ghtml);
+      const shop = (await call('GET', '/api/ads/accounts?platform=google&limit=100', null, admin)).body.data.find((a) => a.accountId === '777-888-9990');
+      assert(shop && shop.connected, 'customer ID filled in automatically');
+      assert.equal((await call('GET', `/api/ads/accounts/${shop._id}/connection`, null, admin)).body.config.loginCustomerId, '415-388-1360', 'reached through the manager account');
+      await waitFor(async () => (await call('GET', `/api/ads/accounts/${shop._id}/connection`, null, admin)).body.lastSyncAt);
+      assert(seen.some((x) => x.includes('/customers/7778889990/') && x.endsWith('login=4153881360')), 'sync goes through the manager');
+
+      // Expiring logins are announced once, a week ahead.
+      const M = require('../src/models');
+      await M.AdAccount.updateOne({ _id: promo._id }, { tokenExpiresAt: new Date(Date.now() + 3 * 864e5), lastSyncAt: new Date() });
+      await M.AdAccount.updateMany({ company: main.company }, { lastSyncAt: new Date(), lastLeadSyncAt: new Date() });
+      await require('../src/services/adsync').processDue();
+      await require('../src/services/adsync').processDue();
+      const n = (await call('GET', '/api/notifications', null, admin)).body.data.filter((x) => x.title === 'Reconnect Acme FB Promo');
+      assert.equal(n.length, 1);
+    } finally {
+      config.publicUrl = prevUrl;
+      global.fetch = realFetch;
+    }
   });
 
   await test('ads automation: workflow templates pause high-CPL campaigns, scale winners, react to no leads', async () => {

@@ -320,6 +320,8 @@ const AdAccount = make('AdAccount', {
   autoPause: { type: Boolean, default: false }, // pause lead campaigns that spend with no leads
   lastSyncAt: Date,
   lastSyncError: String,
+  tokenExpiresAt: Date, // set when connected by Facebook/Google sign-in with an expiring token
+  tokenWarnedAt: Date,
   // Meta lead forms (instant forms) are pulled every few minutes; leads newer than lastLeadAt are imported.
   lastLeadSyncAt: Date,
   lastLeadAt: Date,

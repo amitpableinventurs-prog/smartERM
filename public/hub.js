@@ -750,7 +750,13 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
         draw(await api('/hub/providers/' + p.channel, { method: 'PUT', body }));
         toast('Saved');
       });
-      const test = guard(async () => { const r = await api(`/hub/providers/${p.channel}/test`, { method: 'POST', body: { to: testTo.value } }); toast(`Test ${r.status} via ${r.provider}`); });
+      // Meta/Twilio only deliver free text to people who messaged you in the last 24h; a template proves delivery to anyone.
+      const testTpl = p.channel === 'whatsapp' && el.input('', { placeholder: 'Template, e.g. hello_world', style: 'max-width:190px', title: 'Approved template name (optional). Needed unless this number messaged you in the last 24 hours.' });
+      const test = guard(async () => {
+        const tpl = testTpl && testTpl.value.trim();
+        const r = await api(`/hub/providers/${p.channel}/test`, { method: 'POST', body: { to: testTo.value, ...(tpl && { template: tpl }) } });
+        toast(`Test ${r.status} via ${r.provider}${r.providerId ? ' · id ' + r.providerId : ''}`);
+      });
       setKids(box,
         h('div', { class: 'hd' }, h('h3', { class: 'ttl-ic' }, icon(p.channel === 'sms' ? 'bulksms' : p.channel === 'whatsapp' ? 'bulkwa' : 'ivrcalls'), HUB_LABEL[p.channel]),
           p.provider === 'simulated' ? h('span', { class: 'pill paused' }, 'Simulated') : h('span', { class: 'pill ' + (p.active ? 'active' : 'paused') }, NAMES[p.provider].split(' (')[0])),
@@ -758,7 +764,7 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
         flowSel && fld('Inbound calls are answered by', flowSel),
         inline(active, 'Active'), help,
         p.lastError && h('div', { class: 'warnbar' }, 'Last error: ' + p.lastError),
-        can('hubsetup', 'u') && h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn', onclick: save }, 'Save'), h('div', { class: 'grow' }), testTo, h('button', { class: 'btn sec', onclick: test }, p.channel === 'voice' ? 'Test call' : 'Send test')),
+        can('hubsetup', 'u') && h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn', onclick: save }, 'Save'), h('div', { class: 'grow' }), testTo, testTpl, h('button', { class: 'btn sec', onclick: test }, p.channel === 'voice' ? 'Test call' : 'Send test')),
         p.webhooks ? h('div', { class: 'hooks' }, h('label', {}, 'Webhook URLs for your provider'),
           Object.entries(p.webhooks).map(([k, u]) => copyRow(k === 'inbound' ? (p.channel === 'voice' ? 'Incoming call' : 'Incoming message') : 'Status / delivery report', u)),
           !p.publicUrlSet && p.provider !== 'simulated' && h('div', { class: 'warnbar' }, 'Set PUBLIC_URL in .env to your public https address so the provider can reach this server (needed for delivery reports and outbound calls).'))
