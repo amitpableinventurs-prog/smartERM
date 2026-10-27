@@ -12,6 +12,8 @@
  *   add_tag       { tag }
  *   notify        { to: 'owner' | 'managers' | userId, title, body? }
  *   ai_score      {}
+ *   ai_message    { channel: 'whatsapp' | 'sms' | 'email', purpose, tone?, context? }  (the LLM writes a personal message, then it is sent)
+ *   ai_ad_review  { maxChangePct?: 30, everyHours?: 24 }  (AdCampaign: AI suggests pause/resume/budget; a manager approves)
  *   ad_pause | ad_resume   {}                         (ad campaign triggers; applied on Google Ads / Meta when linked)
  *   ad_set_budget { value? | changePct?, min?, max? } (never above the company's ad approval limit)
  *   wait          { days?, hours?, minutes? }
@@ -33,6 +35,7 @@ const { render, addDays } = require('../utils/helpers');
 const { accessProblem } = require('../modules');
 const tenants = require('./tenants');
 const adsync = require('./adsync');
+const adai = require('./adai');
 
 const MODELS = { Lead: M.Lead, Customer: M.Customer, Deal: M.Deal, Task: M.Task, AdCampaign: M.AdCampaign, AdAccount: M.AdAccount };
 const MAX_STEPS_PER_RUN = 200;
@@ -83,6 +86,16 @@ async function personOf(ctx) {
   return rel ? MODELS[rel.k]?.findById(rel.id) : null;
 }
 
+// Sends one message to the workflow's person and records the contact.
+async function deliver(ctx, run, person, channel, subject, body) {
+  const comm = await send({
+    company: ctx.company, channel, to: addressFor(channel, person), subject, body,
+    relatedTo: { kind: person.constructor.modelName, id: person._id }, workflowRun: run._id,
+  });
+  if (person.lastContactedAt !== undefined) { person.lastContactedAt = new Date(); await person.save(); }
+  return comm;
+}
+
 async function doStep(step, ctx, run) {
   const { company, entity } = ctx;
   const withPerson = async () => { const p = await personOf(ctx); return { ...ctx.data, person: p, lead: p, customer: p }; };
@@ -108,12 +121,31 @@ async function doStep(step, ctx, run) {
         ({ subject, body } = t);
       }
       const tctx = { ...ctx.data, person, lead: person, customer: person };
-      const comm = await send({
-        company, channel, to: addressFor(channel, person), subject: render(subject, tctx), body: render(body, tctx),
-        relatedTo: { kind: person.constructor.modelName, id: person._id }, workflowRun: run._id,
-      });
-      if (person.lastContactedAt !== undefined) { person.lastContactedAt = new Date(); await person.save(); }
+      const comm = await deliver(ctx, run, person, channel, render(subject, tctx), render(body, tctx));
       return `${channel} ${comm.status} to ${comm.to}`;
+    }
+    case 'ai_message': {
+      const channel = ['whatsapp', 'sms', 'email'].includes(step.channel) ? step.channel : 'whatsapp';
+      const person = await personOf(ctx);
+      if (!person) return 'no recipient';
+      if (!step.purpose) throw new Error('ai_message needs a purpose');
+      const tctx = { ...ctx.data, person, lead: person, customer: person };
+      const camp = person.adCampaign && (await M.AdCampaign.findById(person.adCampaign).select('name'));
+      const about = {
+        name: person.name, organization: person.organization, source: person.source, status: person.status || person.lifecycle,
+        tags: person.tags, budget: person.budget, adCampaign: camp?.name, formAnswers: person.customFields,
+      };
+      const r = await ai.generateMessage({ channel, purpose: render(step.purpose, tctx), tone: step.tone || 'friendly', person: about, context: step.context ? render(step.context, tctx) : '' });
+      let body = String(r.text || '').trim();
+      let subject;
+      if (channel === 'email') {
+        const m = /^\W*subject:\W*(.+)\n+/i.exec(body);
+        subject = m ? m[1].replace(/\*+$/, '').trim() : render(step.subject || 'Hello {{person.name}}', tctx);
+        if (m) body = body.slice(m[0].length).trim();
+      }
+      if (!body) throw new Error('The AI returned an empty message');
+      const comm = await deliver(ctx, run, person, channel, subject, body);
+      return `${channel} ${comm.status} to ${comm.to} (written by ${r.engine})`;
     }
     case 'create_task': {
       const assignedTo = step.assignTo && step.assignTo !== 'owner' ? step.assignTo : entity.assignedTo;
@@ -161,6 +193,12 @@ async function doStep(step, ctx, run) {
       await adsync.changeBudget(entity, next);
       await logActivity(company, { kind: 'AdCampaign', id: entity._id }, 'ad.budget', `Daily budget ${cur} -> ${next} by workflow`);
       return `daily budget ${cur} -> ${next}`;
+    }
+    case 'ai_ad_review': {
+      if (ctx.kind !== 'AdCampaign') return 'skipped (not an ad campaign)';
+      const r = await adai.recommend(entity, { maxChangePct: step.maxChangePct, everyHours: step.everyHours ?? 24 });
+      if (r.skipped) return `skipped (${r.skipped})`;
+      return r.action === 'keep' ? `AI: keep (${r.engine})` : `AI suggests ${adai.label(r)}; waiting for a manager`;
     }
     case 'ai_score': {
       if (ctx.kind !== 'Lead') return 'skipped (not a lead)';
@@ -383,6 +421,32 @@ const TEMPLATES = [
       { type: 'ad_pause' },
       { type: 'notify', to: 'managers', title: '{{name}} paused: no leads', body: 'Spent {{payload.spend}} in {{payload.days}} days without a lead' },
     ],
+  },
+  {
+    name: 'AI: follow up new ad leads (score, personal WhatsApp, route hot leads)',
+    trigger: { event: 'lead.created', conditions: [{ field: 'source', op: 'eq', value: 'ads' }] },
+    steps: [
+      { type: 'ai_score' },
+      { type: 'ai_message', channel: 'whatsapp', tone: 'warm', purpose: 'Thank them for responding to our ad, refer to what they asked for in the form, ask one short question about their requirement and offer a quick call' },
+      { type: 'condition', if: { field: 'score', op: 'gte', value: 70 }, then: [
+        { type: 'assign', strategy: 'least_loaded' },
+        { type: 'create_task', title: 'Hot ad lead: call {{person.name}} now', dueInDays: 0, priority: 'urgent' },
+        { type: 'notify', to: 'managers', title: 'Hot ad lead: {{person.name}}', body: 'AI score {{score}}: {{scoreReason}}' },
+      ], else: [
+        { type: 'assign', strategy: 'least_loaded' },
+        { type: 'create_task', title: 'Call ad lead {{person.name}}', dueInDays: 1, priority: 'medium' },
+        { type: 'add_tag', tag: 'nurture' },
+      ] },
+      { type: 'wait', days: 1 },
+      { type: 'condition', if: { type: 'no_reply' }, then: [
+        { type: 'ai_message', channel: 'whatsapp', tone: 'friendly', purpose: 'Polite one-line follow-up: check whether they are still interested and when is a good time to talk' },
+      ], else: [] },
+    ],
+  },
+  {
+    name: 'AI: review ad campaigns after each sync (manager approves changes)',
+    trigger: { event: 'ad.performance_updated', conditions: [{ field: 'status', op: 'in', value: ['active', 'paused'] }] },
+    steps: [{ type: 'ai_ad_review', maxChangePct: 30, everyHours: 24 }],
   },
   {
     name: 'Ads: alert when an ad account stops syncing',

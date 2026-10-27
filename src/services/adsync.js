@@ -17,8 +17,11 @@ const { seal, unseal, maskedConfig, mergeConfig } = require('./providers');
 const { notify, logActivity, emit } = require('./events');
 const { accessProblem, hasModule } = require('../modules');
 const tenants = require('./tenants');
+const ai = require('./ai');
+const { normalize, phoneKey } = require('../utils/phone');
 
 const SYNC_EVERY_MS = 3 * 3600e3;
+const LEAD_SYNC_EVERY_MS = 10 * 60e3;
 const SYNC_DAYS = 7; // conversions are attributed late, so recent days are re-read every sync
 const APPROVER_ROLES = ['super_admin', 'admin', 'manager'];
 
@@ -213,6 +216,24 @@ const meta = {
     await call(graph(c.externalId), { method: 'POST', headers: metaAuth(cfg), form: { daily_budget: String(Math.round(amount * minor(acc))) } });
   },
   async test(acc, cfg) { await call(graph(`${actId(acc)}?fields=name,currency`), { headers: metaAuth(cfg) }); },
+  // Instant-form leads created after `since`, read per ad of the given campaigns.
+  // The token needs leads_retrieval and access to the Page that runs the ads.
+  async pullLeads(acc, cfg, since, campaignIds) {
+    const ads = (await metaList(cfg, graph(`${actId(acc)}/ads?fields=id,campaign_id&limit=500`), 5)).filter((a) => campaignIds.has(String(a.campaign_id)));
+    const filtering = encodeURIComponent(JSON.stringify([{ field: 'time_created', operator: 'GREATER_THAN', value: Math.floor(since.getTime() / 1000) }]));
+    const out = [];
+    for (const ad of ads) {
+      for (const l of await metaList(cfg, graph(`${ad.id}/leads?fields=id,created_time,field_data,campaign_id,form_id&filtering=${filtering}&limit=200`), 5)) {
+        const f = Object.fromEntries((l.field_data || []).map((x) => [String(x.name).toLowerCase(), (x.values || []).join(', ')]));
+        const { full_name: fullName, first_name: first, last_name: last, email, phone_number: phoneNumber, phone, ...answers } = f;
+        out.push({
+          id: String(l.id), at: new Date(l.created_time), campaignId: String(l.campaign_id || ad.campaign_id), formId: l.form_id && String(l.form_id),
+          name: fullName || [first, last].filter(Boolean).join(' ') || f.name, email, phone: phoneNumber || phone, answers,
+        });
+      }
+    }
+    return out;
+  },
 };
 
 const NETWORKS = { google, meta };
@@ -229,6 +250,7 @@ function connectionView(acc) {
   return {
     platform: acc.platform, supported: SUPPORTED.includes(acc.platform), connected: !!acc.connected,
     autoSync: acc.autoSync, autoPause: acc.autoPause, lastSyncAt: acc.lastSyncAt, lastSyncError: acc.lastSyncError,
+    leadForms: !!NETWORKS[acc.platform]?.pullLeads, lastLeadSyncAt: acc.lastLeadSyncAt, leadSyncError: acc.leadSyncError,
     config: maskedConfig(acc.platform, cfg, FIELDS), fields: FIELDS[acc.platform] || [],
     serverDefaults: acc.platform === 'google' && {
       developerToken: !!config.googleAds.developerToken, oauthClient: !!(config.googleAds.clientId && config.googleAds.clientSecret),
@@ -284,6 +306,7 @@ async function syncAccount(acc, { days = SYNC_DAYS } = {}) {
     acc.lastSyncError = undefined;
     await acc.save();
     result.autoPaused = await afterNewData(acc.company, touched);
+    if (net.pullLeads) result.leadsImported = await syncLeads(acc);
     return result;
   } catch (e) {
     const firstFailure = !acc.lastSyncError; // alert once, not every 3 hours while it stays broken
@@ -332,6 +355,58 @@ async function save(acc, campaigns, rows) {
   }
   for (const c of created) await emit(company, 'ad.campaign_imported', ref(c), { platform: acc.platform, externalId: c.externalId });
   return { campaignsCreated: created.length, campaignsUpdated: updated, metricRows: saved, touched: [...touched] };
+}
+
+// ---------- ad-network lead forms ----------
+// Imports new instant-form leads as CRM leads attributed to their campaign; lead.created then starts the
+// follow-up workflows. The first run only looks back a day so old leads are not messaged again.
+// Failures are stored on the account (leadSyncError) and never break the campaign sync.
+async function syncLeads(acc) {
+  const net = NETWORKS[acc.platform];
+  if (!net?.pullLeads || !acc.connected) return 0;
+  if (acc.credentials === undefined) acc = await loadAccount(acc.company, acc._id);
+  const company = acc.company;
+  const camps = await M.AdCampaign.find({ company, account: acc._id, externalId: { $ne: null }, status: { $in: ['active', 'paused'] } }).select('externalId');
+  const byExt = new Map(camps.map((c) => [c.externalId, c]));
+  const since = acc.lastLeadAt || new Date(Date.now() - 864e5);
+  let imported = 0;
+  try {
+    const leads = byExt.size ? await net.pullLeads(acc, unseal(acc.credentials), since, new Set(byExt.keys())) : [];
+    for (const x of leads.sort((a, b) => a.at - b.at)) {
+      if (!acc.lastLeadAt || x.at > acc.lastLeadAt) acc.lastLeadAt = x.at;
+      if (await M.Lead.exists({ company, 'customFields.adLeadId': x.id })) continue;
+      const camp = byExt.get(x.campaignId);
+      const phone = x.phone && normalize(x.phone);
+      const email = x.email && String(x.email).toLowerCase().trim();
+      const or = [email && { email }, phone && { phoneKey: phoneKey(phone) }].filter(Boolean);
+      const existing = or.length && (await M.Lead.findOne({ company, $or: or }));
+      const entity = existing && { kind: 'Lead', id: existing._id };
+      if (existing) {
+        existing.notes.push({ text: `Filled the ${acc.platform} lead form again: ${JSON.stringify(x.answers).slice(0, 500)}` });
+        if (!existing.adCampaign && camp) existing.adCampaign = camp._id;
+        await existing.save();
+        await logActivity(company, entity, 'ad.lead_form', 'Existing lead filled an ad lead form again');
+        continue;
+      }
+      if (!x.name && !email && !phone) continue;
+      const lead = new M.Lead({
+        company, name: x.name || email || phone, email, phone, source: 'ads', adCampaign: camp?._id, tags: [`${acc.platform}-lead-form`],
+        customFields: { adLeadId: x.id, adFormId: x.formId, ...Object.fromEntries(Object.entries(x.answers).slice(0, 20)) },
+      });
+      lead.score = ai.heuristicScore(lead).score;
+      await lead.save();
+      const lref = { kind: 'Lead', id: lead._id };
+      await logActivity(company, lref, 'lead.created', `New lead from ${acc.platform === 'meta' ? 'Meta' : acc.platform} lead form${camp ? ` (campaign ${x.campaignId})` : ''}`);
+      emit(company, 'lead.created', lref, { adPlatform: acc.platform, adLeadId: x.id });
+      imported++;
+    }
+    acc.leadSyncError = undefined;
+  } catch (e) {
+    acc.leadSyncError = e.message.slice(0, 500);
+  }
+  acc.lastLeadSyncAt = new Date();
+  await acc.save();
+  return imported;
 }
 
 // Last 7 days (plus today and lifetime) of one campaign: the payload of ad.performance_updated,
@@ -456,9 +531,19 @@ async function processDue() {
     if (accessProblem(co) || !hasModule(co, 'ads')) continue;
     try { await syncAccount(acc); } catch (e) { console.error(`[adsync ${acc._id}]`, e.message); }
   }
+  // Lead forms are checked more often than campaign numbers, so follow-ups go out within minutes.
+  const leadDue = await M.AdAccount.find({
+    connected: true, status: 'active', platform: { $in: SUPPORTED.filter((p) => NETWORKS[p]?.pullLeads) },
+    $or: [{ lastLeadSyncAt: null }, { lastLeadSyncAt: { $lt: new Date(Date.now() - LEAD_SYNC_EVERY_MS) } }],
+  }).select('+credentials').limit(20);
+  for (const acc of leadDue) {
+    const co = await tenants.getCompany(acc.company);
+    if (accessProblem(co) || !hasModule(co, 'ads')) continue;
+    await syncLeads(acc).catch((e) => console.error(`[adsync leads ${acc._id}]`, e.message));
+  }
 }
 
 module.exports = {
   FIELDS, SUPPORTED, trackingCode, wastingSpend, notifyApprovers, approvalLimit, kpis, SUMS, push, changeStatus, changeBudget,
-  afterNewData, campaignStats, loadAccount, connectionView, saveConnection, storeGoogleToken, disconnect, syncAccount, processDue,
+  afterNewData, campaignStats, loadAccount, connectionView, saveConnection, storeGoogleToken, disconnect, syncAccount, syncLeads, processDue,
 };

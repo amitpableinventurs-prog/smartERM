@@ -6,7 +6,7 @@ const { HttpError } = require('../utils/helpers');
 const automation = require('../services/automation');
 const adsync = require('../services/adsync');
 
-const STEP_TYPES = ['assign', 'send_email', 'send_whatsapp', 'send_sms', 'create_task', 'update_field', 'add_tag', 'notify', 'ai_score', 'ad_pause', 'ad_resume', 'ad_set_budget', 'wait', 'condition'];
+const STEP_TYPES = ['assign', 'send_email', 'send_whatsapp', 'send_sms', 'ai_message', 'create_task', 'update_field', 'add_tag', 'notify', 'ai_score', 'ai_ad_review', 'ad_pause', 'ad_resume', 'ad_set_budget', 'wait', 'condition'];
 const TEST_KINDS = ['Lead', 'Customer', 'Deal', 'Task', 'AdCampaign', 'AdAccount'];
 
 const step = z.lazy(() =>

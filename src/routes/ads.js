@@ -1,6 +1,6 @@
 /**
  * Advertising module: accounts, campaigns, creatives, daily performance data,
- * lead attribution, budget approvals and rule-based recommendations.
+ * lead attribution, budget approvals, rule-based recommendations and AI (suggestions a manager approves, ad copy).
  * Performance data is entered manually, imported from CSV, or synced from Google Ads / Meta
  * (services/adsync.js); status and budget changes on linked campaigns are pushed to the network.
  */
@@ -13,6 +13,7 @@ const { validate } = require('../middleware/common');
 const { HttpError, parseCsv } = require('../utils/helpers');
 const { notify, logActivity } = require('../services/events');
 const adsync = require('../services/adsync');
+const adai = require('../services/adai');
 
 const router = express.Router();
 const APPROVER_ROLES = ['super_admin', 'admin', 'manager'];
@@ -398,7 +399,75 @@ router.get('/insights', authorize('ads', 'r'), async (req, res) => {
   for (const c of pending) add('medium', c, 'Waiting for approval', `Daily budget ${c.dailyBudget} is above the approval limit.`);
   const rank = { high: 0, medium: 1, good: 2 };
   out.sort((a, b) => rank[a.severity] - rank[b.severity]);
-  res.json({ engine: 'rules', window: '14 days', accountAvg: { cpl: overall.cpl, ctr: overall.ctr, roas: overall.roas }, insights: out });
+  const accountAvg = { cpl: overall.cpl, ctr: overall.ctr, roas: overall.roas };
+  // ?ai=1 adds a plain-language review by the LLM (one call, so it is only made on request).
+  let aiReview;
+  if (req.query.ai === '1') {
+    const campaigns = camps.filter((c) => ['active', 'paused'].includes(c.status) && by[String(c._id)])
+      .sort((a, b) => by[String(b._id)].spend - by[String(a._id)].spend).slice(0, 25)
+      .map((c) => ({ name: c.name, status: c.status, objective: c.objective, dailyBudget: c.dailyBudget, last14Days: by[String(c._id)] }));
+    aiReview = await adai.insights({ window: '14 days', accountAverage: { ...accountAvg, spend: overall.spend, leads: overall.leads }, campaigns, ruleFindings: out.map(({ campaign, title, detail, severity }) => ({ campaign, title, detail, severity })) });
+  }
+  res.json({ engine: 'rules', window: '14 days', accountAvg, insights: out, ai: aiReview });
+});
+
+// ---------------- AI: campaign suggestions (approved by a manager), ad copy ----------------
+const loadRec = async (req) => {
+  const r = await M.AdRecommendation.findOne({ _id: req.params.id, company: req.companyId });
+  if (!r) throw new HttpError(404, 'Suggestion not found');
+  return r;
+};
+
+router.get('/recommendations', authorize('ads', 'r'), async (req, res) => {
+  const q = { company: req.companyId };
+  if (req.query.status) q.status = String(req.query.status);
+  const data = await M.AdRecommendation.find(q).sort('-createdAt').limit(Math.min(200, +req.query.limit || 100))
+    .populate('campaign', 'name status dailyBudget objective').populate('decidedBy', 'name');
+  res.json({ data, pending: await M.AdRecommendation.countDocuments({ company: req.companyId, status: 'pending' }) });
+});
+
+for (const [path, approve] of [['approve', true], ['reject', false]]) {
+  router.post(`/recommendations/:id/${path}`, authorize('ads', 'u'), async (req, res) => {
+    if (!isApprover(req)) throw new HttpError(403, 'Only a manager or admin can decide AI suggestions');
+    res.json(await adai.decide(await loadRec(req), req.user, approve));
+  });
+}
+
+// Review one campaign (campaignId) or every active/paused linked campaign now, ignoring the every-24h limit.
+router.post('/ai/review', authorize('ads', 'u'), validate(z.object({ campaignId: z.string().length(24).optional(), maxChangePct: z.number().min(5).max(100).optional() })), async (req, res) => {
+  const q = { company: req.companyId, status: { $in: ['active', 'paused'] } };
+  if (req.body.campaignId) q._id = req.body.campaignId;
+  const camps = await M.AdCampaign.find(q).limit(20);
+  if (!camps.length) throw new HttpError(404, 'No active or paused campaign to review');
+  const results = [];
+  for (const c of camps) {
+    const r = await adai.recommend(c, { maxChangePct: req.body.maxChangePct, everyHours: 0, source: 'manual' });
+    results.push({ campaign: c.name, ...(r.skipped ? { skipped: r.skipped } : { action: r.action, label: adai.label(r), reason: r.reason, engine: r.engine, recommendation: r._id }) });
+  }
+  res.json({ results });
+});
+
+router.post('/ai/copy', authorize('ads', 'r'), validate(z.object({
+  product: z.string().min(2).max(500), audience: z.string().max(300).optional(), offer: z.string().max(300).optional(),
+  language: z.string().max(40).optional(), tone: z.string().max(40).optional(), platform: z.enum(['meta', 'google']).optional(),
+  count: z.number().int().min(1).max(6).optional(),
+  campaignId: z.string().length(24).optional(), landingUrl: z.string().max(500).optional(), save: z.boolean().optional(),
+  // save the variants already shown instead of writing new ones
+  variants: z.array(z.object({ angle: z.string().max(40).optional(), headline: z.string().min(1).max(80), body: z.string().min(1).max(500), cta: z.enum(adai.CTAS) })).max(6).optional(),
+})), async (req, res) => {
+  const out = req.body.save && req.body.variants?.length ? { variants: req.body.variants } : await adai.adCopy(req.body);
+  if (req.body.save) {
+    if (!req.body.campaignId) throw new HttpError(400, 'Choose a campaign to save the creatives to');
+    const c = await M.AdCampaign.findOne({ _id: req.body.campaignId, company: req.companyId }).select('_id');
+    if (!c) throw new HttpError(404, 'Campaign not found');
+    const used = new Set((await M.AdCreative.find({ campaign: c._id }).select('variant')).map((x) => x.variant));
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter((l) => !used.has(l));
+    out.saved = await M.AdCreative.insertMany(out.variants.map((v, i) => ({
+      company: req.companyId, campaign: c._id, name: `AI ${v.angle || 'variant'} ${letters[i] || i + 1}`, variant: letters[i] || String(i + 1),
+      type: 'image', headline: v.headline, body: v.body, cta: v.cta, landingUrl: req.body.landingUrl,
+    })));
+  }
+  res.json(out);
 });
 
 module.exports = router;

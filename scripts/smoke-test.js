@@ -10,6 +10,7 @@ process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID = '';
 // Messages stay simulated and the AI uses its built-in rules, so the run is deterministic and sends nothing real.
 // Live AI flows are covered by scripts/ai-live-test.js.
 process.env.TWILIO_ACCOUNT_SID = '';
+process.env.PUBLIC_URL = '';
 process.env.SMTP_HOST = '';
 process.env.OPENAI_API_KEY = '';
 process.env.GEMINI_API_KEY = '';
@@ -350,6 +351,9 @@ async function waitFor(fn, ms = 8000) {
         sent.push({ u, h: opt.headers, b: opt.body && String(opt.body), m: opt.method });
         if (u.includes('/act_555?')) return reply({ name: 'Meta acc', currency: 'INR' });
         if (u.includes('/act_555/campaigns')) return reply({ data: [{ id: '777', name: 'FB Leads', status: 'ACTIVE', daily_budget: '200000', objective: 'OUTCOME_LEADS' }] });
+        if (u.includes('/act_555/ads?')) return reply({ data: [{ id: '888', campaign_id: '777' }, { id: '889', campaign_id: '999-not-ours' }] });
+        if (u.includes('/888/leads?')) return reply({ data: [{ id: 'L1', created_time: new Date().toISOString(), campaign_id: '777', form_id: 'F1', field_data: [
+          { name: 'full_name', values: ['Meta Mona'] }, { name: 'phone_number', values: ['+919876512345'] }, { name: 'email', values: ['Mona@X.test'] }, { name: 'which_service?', values: ['Modular kitchen'] }] }] });
         if (u.includes('/act_555/insights')) return reply({ data: [{ campaign_id: '777', date_start: today, impressions: '5000', clicks: '100', spend: '3000.50', actions: [{ action_type: 'lead', value: '0' }, { action_type: 'onsite_conversion.lead_grouped', value: '0' }] }] });
         if ((opt.method || 'GET') === 'POST') return reply({ success: true });
         return reply({ error: { message: 'unexpected ' + u } }, 400);
@@ -414,6 +418,13 @@ async function waitFor(fn, ms = 8000) {
       assert(sent.some((x) => x.u.endsWith('/777') && x.m === 'POST' && x.b.includes('status=PAUSED')));
       const mc = (await call('GET', `/api/ads/campaigns?account=${m._id}`, null, admin)).body.data[0];
       assert.deepEqual([mc.status, mc.dailyBudget, mc.objective], ['paused', 2000, 'leads'], 'paise -> rupees');
+      // Lead-form leads are imported once, attributed to the campaign, with the form answers.
+      assert.equal(s.leadsImported, 1, JSON.stringify(s));
+      assert(!sent.some((x) => x.u.includes('/889/leads')), 'only ads of CRM campaigns are read');
+      const mona = (await call('GET', '/api/leads?q=Meta Mona', null, admin)).body.data[0];
+      assert.deepEqual([mona.source, mona.email, String(mona.adCampaign?._id || mona.adCampaign), mona.customFields.adLeadId, mona.customFields['which_service?']], ['ads', 'mona@x.test', mc._id, 'L1', 'Modular kitchen']);
+      assert.equal((await call('POST', `/api/ads/accounts/${m._id}/sync`, {}, admin)).body.leadsImported, 0, 'no duplicate on the next sync');
+      assert((await call('GET', `/api/ads/accounts/${m._id}/connection`, null, admin)).body.lastLeadSyncAt);
 
       // Disconnect keeps data; Google sign-in needs server OAuth + PUBLIC_URL.
       assert.equal((await call('DELETE', `/api/ads/accounts/${m._id}/connection`, null, admin)).body.connected, false);
@@ -482,6 +493,72 @@ async function waitFor(fn, ms = 8000) {
     assert.equal((await call('POST', `/api/workflows/${winners._id}/test`, { kind: 'AdCampaign', id: '0123456789abcdef01234567' }, admin)).status, 404);
 
     for (const wf of [highCpl, winners, noLeads]) await call('DELETE', `/api/workflows/${wf._id}`, null, admin);
+  });
+
+  await test('AI ads (rules engine): suggestions wait for a manager, insights, ad copy, AI follow-up of ad leads', async () => {
+    const meta = (await call('GET', '/api/workflows/meta', null, admin)).body;
+    assert(['ai_message', 'ai_ad_review'].every((t) => meta.stepTypes.includes(t)));
+    const install = async (prefix) => {
+      const i = meta.templates.findIndex((t) => t.name.startsWith(prefix));
+      assert(i >= 0, prefix);
+      const wf = (await call('POST', `/api/workflows/from-template/${i}`, null, admin)).body;
+      await call('POST', `/api/workflows/${wf._id}/toggle`, null, admin);
+      return wf;
+    };
+    const review = await install('AI: review ad campaigns');
+    const acc = (await call('POST', '/api/ads/accounts', { platform: 'other', name: 'AI acc' }, admin)).body;
+    const mk = async (name) => {
+      const c = (await call('POST', '/api/ads/campaigns', { account: acc._id, name, dailyBudget: 1000, objective: 'leads' }, admin)).body;
+      await call('POST', `/api/ads/campaigns/${c._id}/launch`, {}, admin);
+      return c;
+    };
+    const today = new Date().toISOString().slice(0, 10);
+    const pending = async (c) => waitFor(async () => (await call('GET', '/api/ads/recommendations?status=pending', null, admin)).body.data.find((r) => r.campaign?._id === c._id));
+
+    // Spend with no leads: the AI review (rules here) suggests a pause; nothing changes until a manager approves.
+    const waste = await mk('AI Waste');
+    await call('POST', '/api/ads/metrics', { campaign: waste._id, date: today, impressions: 9000, clicks: 300, spend: 6000, leads: 0 }, admin);
+    const rec = await pending(waste);
+    assert.deepEqual([rec.action, rec.engine, rec.source], ['pause', 'heuristic', 'workflow']);
+    assert.equal((await call('GET', `/api/ads/campaigns/${waste._id}`, null, admin)).body.status, 'active', 'not paused before approval');
+    await call('POST', '/api/ads/metrics', { campaign: waste._id, date: new Date(Date.now() - 864e5).toISOString().slice(0, 10), impressions: 10, clicks: 1, spend: 10, leads: 0 }, admin);
+    assert.equal((await call('GET', '/api/ads/recommendations?status=pending', null, admin)).body.data.filter((r) => r.campaign?._id === waste._id).length, 1, 'no duplicate while one is pending');
+    assert.equal((await call('POST', `/api/ads/recommendations/${rec._id}/approve`, null, salesTok)).status, 403);
+    const done = (await call('POST', `/api/ads/recommendations/${rec._id}/approve`, null, admin)).body;
+    assert.equal(done.status, 'applied', JSON.stringify(done));
+    assert.equal((await call('GET', `/api/ads/campaigns/${waste._id}`, null, admin)).body.status, 'paused');
+    assert.equal((await call('POST', `/api/ads/recommendations/${rec._id}/approve`, null, admin)).status, 409);
+    assert.equal((await call('POST', '/api/ads/ai/review', { campaignId: waste._id }, admin)).body.results[0].action, 'keep', 'rules never resume a bad campaign');
+
+    // A winner gets a capped budget increase; a rejected suggestion changes nothing.
+    const star = await mk('AI Star');
+    await call('POST', '/api/ads/metrics', { campaign: star._id, date: today, impressions: 9000, clicks: 300, spend: 2500, leads: 10, revenue: 10000 }, admin);
+    const up = await pending(star);
+    assert.deepEqual([up.action, up.currentBudget, up.dailyBudget], ['budget', 1000, 1200]);
+    assert.equal((await call('POST', `/api/ads/recommendations/${up._id}/reject`, null, admin)).body.status, 'rejected');
+    assert.equal((await call('GET', `/api/ads/campaigns/${star._id}`, null, admin)).body.dailyBudget, 1000);
+
+    const ins = (await call('GET', '/api/ads/insights?ai=1', null, admin)).body;
+    assert(ins.ai.summary && Array.isArray(ins.ai.priorities) && ins.ai.engine === 'heuristic', JSON.stringify(ins.ai));
+    assert.equal((await call('GET', '/api/ads/insights', null, admin)).body.ai, undefined, 'the LLM is only asked on request');
+
+    const copy = (await call('POST', '/api/ads/ai/copy', { product: 'Modular kitchen', offer: 'Free design visit', count: 2 }, admin)).body;
+    assert.equal(copy.variants.length, 2);
+    const saved = (await call('POST', '/api/ads/ai/copy', { product: 'Modular kitchen', campaignId: star._id, save: true, variants: copy.variants }, admin)).body;
+    assert.deepEqual(saved.saved.map((x) => [x.variant, x.headline]), copy.variants.map((v, i) => ['AB'[i], v.headline]), 'the variants shown are the ones saved');
+    assert.equal((await call('POST', '/api/ads/ai/copy', { product: 'x', save: true }, admin)).status, 400);
+
+    // New ad lead: AI score + AI-written WhatsApp, then a wait for the no-reply follow-up.
+    const follow = await install('AI: follow up new ad leads');
+    const lead = (await call('POST', '/api/leads', { name: 'Ad Anil', phone: '+919811000111', source: 'ads', customFields: { service: 'Wardrobe' } }, admin)).body;
+    const run = await waitFor(async () => (await call('GET', `/api/workflows/${follow._id}/runs`, null, admin)).body.find((r) => r.status === 'waiting'));
+    assert(run.log.some((l) => l.step === 'ai_score' && l.ok) && run.log.some((l) => l.step === 'ai_message' && l.ok && /whatsapp simulated.*heuristic/.test(l.detail)), JSON.stringify(run.log));
+    const tl = (await call('GET', `/api/leads/${lead._id}/timeline`, null, admin)).body;
+    assert(tl.some((t) => t.type === 'whatsapp.outbound' && t.message.includes('Ad Anil')), JSON.stringify(tl.slice(0, 4)));
+    const bad = (await call('POST', '/api/workflows', { name: 'no purpose', trigger: { event: 'lead.created' }, steps: [{ type: 'ai_message' }] }, admin)).body;
+    assert.equal((await call('POST', `/api/workflows/${bad._id}/test`, { kind: 'Lead', id: lead._id }, admin)).body[0].status, 'failed');
+
+    for (const wf of [review, follow, bad]) await call('DELETE', `/api/workflows/${wf._id}`, null, admin);
   });
 
   await test('hr: employees, punching, attendance, leave, payroll, self-service, RBAC', async () => {

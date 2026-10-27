@@ -51,6 +51,7 @@ const ICONS = {
   adaccounts: '<rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/>',
   adattr: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   adinsights: '<path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.3h6c0-1 .4-1.8 1-2.3A7 7 0 0 0 12 2z"/>',
+  adai: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/>',
   adutm: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   hrdash: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   hremp: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>',
@@ -222,6 +223,7 @@ function listModule(cfg) {
     (cfg.barExtra || []).forEach((b) => (!b.show || b.show()) && bar.append(h('button', { class: 'btn sec', onclick: guard(() => b.run(load)) }, b.label)));
 
     function edit(row) {
+      if (cfg.editor) return cfg.editor(row, load); // a module with its own editor (e.g. the workflow builder)
       const fields = cfg.fields.filter((f) => (row ? !f.createOnly : !f.editOnly));
       const f = form(fields, row || {});
       modal((row ? 'Edit ' : 'New ') + cfg.title, f, [{ label: 'Save', run: async () => {
@@ -396,9 +398,117 @@ MODULES.campaigns = { title: 'Campaigns', render: listModule({
   ],
 }) };
 
+// ---------- visual workflow builder ----------
+const EVENT_LABEL = {
+  'lead.created': 'New lead (any source)', 'lead.status_changed': 'Lead stage changed', 'deal.created': 'New deal', 'deal.stage_changed': 'Deal stage changed',
+  'payment.received': 'Payment received', 'followup.overdue': 'Follow-up overdue', 'customer.inactive': 'Customer inactive', 'customer.birthday': 'Customer birthday',
+  'customer.anniversary': 'Customer anniversary', 'form.submitted': 'Website form submitted', 'whatsapp.received': 'WhatsApp received', 'email.received': 'Email received',
+  'website.activity': 'Website activity', 'sms.received': 'SMS received', 'message.intent': 'AI detected an intent in a chat or call', 'conversation.handoff': 'Chat handed to a human',
+  'call.completed': 'IVR call completed', 'justdial.enquiry': 'JustDial enquiry', 'ad.performance_updated': 'Ad numbers updated (after each sync)', 'ad.no_leads': 'Ad spending with no leads',
+  'ad.budget_exhausted': 'Ad total budget used', 'ad.campaign_imported': 'New ad campaign imported', 'ad.status_changed': 'Ad campaign paused / resumed', 'ad.sync_failed': 'Ad account sync failed',
+};
+const STEP_DEFS = {
+  ai_message: { label: '✨ AI writes & sends a message', f: [{ k: 'channel', type: 'select', opts: ['whatsapp', 'sms', 'email'] }, { k: 'purpose', type: 'textarea', label: 'What the message should do' }, { k: 'tone', placeholder: 'tone, e.g. warm' }] },
+  ai_score: { label: '✨ AI lead score', f: [] },
+  ai_ad_review: { label: '✨ AI reviews the ad campaign (a manager approves changes)', f: [{ k: 'maxChangePct', type: 'number', placeholder: 'max budget change % (30)' }, { k: 'everyHours', type: 'number', placeholder: 'at most every N hours (24)' }] },
+  send_whatsapp: { label: 'Send WhatsApp', f: [{ k: 'body', type: 'textarea', label: 'Message, e.g. Hi {{person.name}}' }] },
+  send_sms: { label: 'Send SMS', f: [{ k: 'body', type: 'textarea', label: 'Message' }] },
+  send_email: { label: 'Send email', f: [{ k: 'subject', placeholder: 'Subject' }, { k: 'body', type: 'textarea', label: 'Body' }] },
+  assign: { label: 'Assign to a team member', f: [{ k: 'strategy', type: 'select', opts: ['least_loaded', 'user'] }, { k: 'userId', type: 'user' }] },
+  create_task: { label: 'Create a task', f: [{ k: 'title', placeholder: 'Task title' }, { k: 'dueInDays', type: 'number', placeholder: 'due in days' }, { k: 'priority', type: 'select', opts: ['low', 'medium', 'high', 'urgent'] }] },
+  notify: { label: 'Notify', f: [{ k: 'to', type: 'select', opts: ['owner', 'managers'] }, { k: 'title', placeholder: 'Title' }, { k: 'body', placeholder: 'Message' }] },
+  add_tag: { label: 'Add a tag', f: [{ k: 'tag', placeholder: 'tag' }] },
+  update_field: { label: 'Update a field', f: [{ k: 'field', placeholder: 'field, e.g. status' }, { k: 'value', placeholder: 'new value' }] },
+  ad_pause: { label: 'Pause the ad campaign', f: [] },
+  ad_resume: { label: 'Resume the ad campaign', f: [] },
+  ad_set_budget: { label: 'Change the ad daily budget', f: [{ k: 'changePct', type: 'number', placeholder: 'change %, e.g. 20 or -30' }, { k: 'value', type: 'number', placeholder: 'or exact amount' }, { k: 'max', type: 'number', placeholder: 'max' }] },
+  wait: { label: 'Wait', f: [{ k: 'days', type: 'number', placeholder: 'days' }, { k: 'hours', type: 'number', placeholder: 'hours' }, { k: 'minutes', type: 'number', placeholder: 'minutes' }] },
+  condition: { label: 'If / else', f: [] },
+};
+const COND_OPS = [['eq', 'is'], ['ne', 'is not'], ['gt', '>'], ['gte', '≥'], ['lt', '<'], ['lte', '≤'], ['contains', 'contains'], ['in', 'is one of (a, b)'], ['exists', 'is set']];
+const COND_FIELDS = ['status', 'source', 'score', 'tags', 'budget', 'objective', 'dailyBudget', 'payload.intent', 'payload.channel', 'payload.to', 'payload.spend', 'payload.leads', 'payload.cpl', 'payload.ctr', 'payload.roas', 'payload.budgetUsedPct', 'payload.today.spend'];
+
+function workflowEditor(meta) {
+  return (row, reload) => {
+    const st = row ? JSON.parse(JSON.stringify({ name: row.name, active: row.active, trigger: row.trigger || {}, steps: row.steps || [] })) : { name: '', active: false, trigger: { event: 'lead.created', conditions: [] }, steps: [] };
+    st.trigger.conditions ||= [];
+    let jsonMode = false;
+    const body = h('div', {});
+    const num = (v) => (v === '' ? undefined : Number(v));
+    const setVal = (o, k, v) => { if (v === undefined || v === '') delete o[k]; else o[k] = v; };
+    const input = (o, f, onChange) => {
+      let el;
+      if (f.type === 'select') { el = h('select', {}, f.opts.map((x) => h('option', { value: x }, x))); if (o[f.k] != null && !f.opts.includes(String(o[f.k]))) el.append(h('option', { value: o[f.k] }, o[f.k])); el.value = o[f.k] ?? f.opts[0]; if (o[f.k] == null) o[f.k] = f.opts[0]; }
+      else if (f.type === 'user') el = fieldEl({ type: 'ref', src: '/users' }, o[f.k]);
+      else if (f.type === 'textarea') { el = h('textarea', { rows: 2, placeholder: f.label || f.k, style: 'flex-basis:100%' }); el.value = o[f.k] ?? ''; }
+      else el = h('input', { type: f.type === 'number' ? 'number' : 'text', placeholder: f.placeholder || f.label || f.k, value: o[f.k] ?? '' });
+      el.addEventListener(f.type === 'select' || f.type === 'user' ? 'change' : 'input', () => { setVal(o, f.k, f.type === 'number' ? num(el.value) : el.value); onChange?.(); });
+      return el;
+    };
+    const condRow = (c, list, i) => {
+      const op = h('select', {}, COND_OPS.map(([v, l]) => h('option', { value: v }, l))); op.value = c.op || 'eq';
+      const val = h('input', { placeholder: 'value', value: Array.isArray(c.value) ? c.value.join(', ') : c.value ?? '' });
+      const field = h('input', { placeholder: 'field', list: 'wf-fields', value: c.field ?? '' });
+      const sync = () => { c.field = field.value.trim(); c.op = op.value; c.value = op.value === 'in' ? val.value.split(',').map((x) => x.trim()).filter(Boolean) : val.value; val.style.display = op.value === 'exists' ? 'none' : ''; };
+      [field, val].forEach((x) => x.addEventListener('input', sync)); op.addEventListener('change', sync); sync();
+      return h('div', { class: 'act-row' }, h('b', {}, i ? 'and' : 'only when'), h('div', { class: 'act-params' }, field, op, val), h('button', { class: 'btn sm bad', onclick: () => { list.splice(i, 1); draw(); } }, '✕'));
+    };
+    const stepList = (list, depth) => h('div', { style: depth ? 'margin-left:18px;padding-left:12px;border-left:2px solid var(--line)' : '' },
+      list.map((s, i) => stepRow(s, list, i, depth)),
+      h('div', { class: 'act-params', style: 'margin:8px 0' }, (() => {
+        const sel = h('select', {}, h('option', { value: '' }, '+ Add a step…'), Object.entries(STEP_DEFS).filter(([t]) => meta.stepTypes.includes(t)).map(([t, d]) => h('option', { value: t }, d.label)));
+        sel.addEventListener('change', () => { if (!sel.value) return; list.push(sel.value === 'condition' ? { type: 'condition', if: { field: 'score', op: 'gte', value: '70' }, then: [], else: [] } : { type: sel.value }); draw(); });
+        return sel;
+      })()));
+    const stepRow = (s, list, i, depth) => {
+      const def = STEP_DEFS[s.type] || { label: s.type, f: [] };
+      const move = (d) => { const j = i + d; if (j < 0 || j >= list.length) return; [list[i], list[j]] = [list[j], list[i]]; draw(); };
+      const tools = h('div', { style: 'display:flex;gap:4px' }, h('button', { class: 'btn sm sec', title: 'Move up', onclick: () => move(-1) }, '↑'), h('button', { class: 'btn sm sec', title: 'Move down', onclick: () => move(1) }, '↓'), h('button', { class: 'btn sm bad', onclick: () => { list.splice(i, 1); draw(); } }, '✕'));
+      if (s.type !== 'condition') return h('div', { class: 'act-row' }, h('b', {}, `${i + 1}. ${def.label}`), h('div', { class: 'act-params' }, def.f.map((f) => input(s, f))), tools);
+      s.if ||= { field: 'score', op: 'gte', value: '70' };
+      const kind = h('select', {}, h('option', { value: 'field' }, 'a field matches'), h('option', { value: 'no_reply' }, 'they have not replied')); kind.value = s.if.type === 'no_reply' ? 'no_reply' : 'field';
+      kind.addEventListener('change', () => { s.if = kind.value === 'no_reply' ? { type: 'no_reply' } : { field: 'score', op: 'gte', value: '70' }; draw(); });
+      const ifRow = s.if.type === 'no_reply' ? null : condRow(s.if, [], 0).querySelector('.act-params');
+      return h('div', { style: 'border-top:1px dashed var(--line);padding:6px 0' },
+        h('div', { class: 'act-row', style: 'border:0' }, h('b', {}, `${i + 1}. If`), h('div', { class: 'act-params' }, kind, ifRow), tools),
+        h('div', { class: 'muted', style: 'margin:2px 0 0 4px' }, 'then'), stepList(s.then ||= [], depth + 1),
+        h('div', { class: 'muted', style: 'margin:2px 0 0 4px' }, 'else'), stepList(s.else ||= [], depth + 1));
+    };
+    function draw() {
+      if (jsonMode) {
+        const ta = h('textarea', { rows: 22, style: 'font-family:monospace;font-size:12px' }); ta.value = JSON.stringify(st, null, 2);
+        ta.addEventListener('input', () => { try { Object.assign(st, JSON.parse(ta.value)); ta.style.borderColor = ''; } catch { ta.style.borderColor = 'var(--bad)'; } });
+        return setKids(body, h('p', { class: 'muted' }, 'Advanced: edit the workflow as JSON.'), ta);
+      }
+      const ev = h('select', {}, meta.events.map((e) => h('option', { value: e }, `${EVENT_LABEL[e] || e}  (${e})`))); ev.value = st.trigger.event;
+      ev.addEventListener('change', () => { st.trigger.event = ev.value; });
+      const name = h('input', { value: st.name, placeholder: 'e.g. Follow up new Meta leads' }); name.addEventListener('input', () => { st.name = name.value; });
+      const active = h('input', { type: 'checkbox', style: 'width:auto' }); active.checked = !!st.active; active.addEventListener('change', () => { st.active = active.checked; });
+      setKids(body,
+        h('datalist', { id: 'wf-fields' }, COND_FIELDS.map((f) => h('option', { value: f }))),
+        h('label', {}, 'Name *'), name,
+        h('label', { style: 'display:flex;gap:8px;align-items:center' }, active, 'Active (runs automatically)'),
+        h('h4', { style: 'margin:16px 0 4px' }, '⚡ When this happens'), ev,
+        st.trigger.conditions.map((c, i) => condRow(c, st.trigger.conditions, i)),
+        h('button', { class: 'btn sm sec', style: 'margin-top:6px', onclick: () => { st.trigger.conditions.push({ field: 'source', op: 'eq', value: '' }); draw(); } }, '+ Only when…'),
+        h('h4', { style: 'margin:18px 0 4px' }, '▶ Do these steps'),
+        st.steps.length ? null : h('p', { class: 'muted', style: 'margin:0' }, 'No steps yet. Tip: ✨ steps use AI (Gemini).'),
+        stepList(st.steps, 0));
+    }
+    const toggle = h('button', { class: 'btn sm sec', style: 'float:right', onclick: () => { jsonMode = !jsonMode; toggle.textContent = jsonMode ? 'Visual editor' : 'Edit as JSON'; draw(); } }, 'Edit as JSON');
+    draw();
+    modal(row ? 'Edit workflow' : 'New workflow', h('div', {}, toggle, body), [{ label: 'Save', run: async () => {
+      if (!String(st.name || '').trim()) throw new Error('Name is required');
+      const payload = { name: st.name.trim(), active: !!st.active, trigger: st.trigger, steps: st.steps };
+      await api('/workflows' + (row ? '/' + row._id : ''), { method: row ? 'PATCH' : 'POST', body: payload });
+      toast('Saved'); reload();
+    } }], true);
+  };
+}
+
 MODULES.workflows = { title: 'Automation', render: async (root) => {
   const meta = await api('/workflows/meta');
-  const wfFields = [{ k: 'name', req: true }, { k: 'active', type: 'checkbox' }, { k: 'trigger', type: 'json', req: true, label: `Trigger JSON — event: ${meta.events.join(' | ')}` }, { k: 'steps', type: 'json', req: true, label: `Steps JSON — types: ${meta.stepTypes.join(' | ')}` }];
+  const wfFields = [{ k: 'name', req: true }]; // the builder (workflowEditor) replaces the generic form
   if (can('workflows', 'c')) {
     const sel = h('select', {}, h('option', { value: '' }, 'Install a ready-made template…'), meta.templates.map((t, i) => h('option', { value: i }, t.name)));
     root.append(h('div', { class: 'bar' }, sel, h('button', { class: 'btn sec', onclick: guard(async () => { if (sel.value === '') return; await api('/workflows/from-template/' + sel.value, { method: 'POST' }); toast('Installed (inactive — review, then activate)'); location.hash = '#/workflows?' + Date.now(); render(); }) }, 'Install')));
@@ -407,7 +517,7 @@ MODULES.workflows = { title: 'Automation', render: async (root) => {
   await listModule({
     res: 'workflows', path: '/workflows', title: 'Workflow', noDelete: false,
     cols: [{ k: 'name' }, { k: 'trigger.event', label: 'Trigger' }, { k: 'active', pill: true }, { k: 'stats.runs', label: 'Runs' }, { k: 'stats.completed', label: 'Done' }, { k: 'stats.failed', label: 'Failed' }],
-    fields: wfFields,
+    fields: wfFields, editor: workflowEditor(meta),
     actions: [
       { label: 'On/Off', perm: ['workflows', 'u'], run: async (r, reload) => { await api(`/workflows/${r._id}/toggle`, { method: 'POST' }); reload(); } },
       { label: 'Runs', run: async (r) => { const runs = await api(`/workflows/${r._id}/runs`); modal('Recent runs', runs.length ? h('div', {}, runs.map((x) => h('div', { class: 'kcard' }, h('b', {}, fmtDate(x.createdAt)), ' ', pill(x.status), x.error && h('div', { class: 'muted' }, x.error), h('div', { class: 'muted' }, x.log.map((l) => `${l.ok ? '✓' : '✗'} ${l.step} ${l.detail}`).join(' → '))))) : h('p', { class: 'muted' }, 'No runs yet.'), [], true); } },
@@ -637,7 +747,7 @@ MODULES.adaccounts = { title: 'Ad Accounts', render: async (root) => {
 const API_PLATFORMS = ['google', 'meta'];
 const API_HELP = {
   google: 'Account ID must be the Google Ads customer ID. Use "Sign in with Google", or paste a refresh token made with your OAuth client (OAuth Playground, scope https://www.googleapis.com/auth/adwords). If the account is managed through an MCC, enter the MCC ID.',
-  meta: 'Account ID must be the ad account ID (act_…). Create a System User in Meta Business Settings, assign it the ad account, and generate a token with ads_read and ads_management. A WhatsApp token works too if it has those permissions.',
+  meta: 'Account ID must be the ad account ID (act_…). Create a System User in Meta Business Settings, assign it the ad account, and generate a token with ads_read and ads_management. Add leads_retrieval (and assign the Facebook Page to the system user) to import lead-form leads every 10 minutes. A WhatsApp token works too if it has those permissions.',
 };
 
 // Ad network API credentials for one account. Secret values come back masked; leaving them unchanged keeps them.
@@ -652,6 +762,8 @@ async function connectModal(acc, done) {
     h('p', { class: 'muted', style: 'margin:0' }, API_HELP[acc.platform]),
     sd && h('p', { class: 'muted' }, `Server defaults: developer token ${sd.developerToken ? 'set' : 'NOT set'} · OAuth client ${sd.oauthClient ? 'set' : 'NOT set'}`),
     c.lastSyncError && h('div', { class: 'warnbar' }, 'Last error: ' + c.lastSyncError),
+    c.leadForms && c.connected && h('p', { class: 'muted', style: 'margin:0' }, c.leadSyncError ? '' : `Lead forms: checked ${c.lastLeadSyncAt ? fmtDate(c.lastLeadSyncAt) : 'not yet'}`),
+    c.leadForms && c.leadSyncError && h('div', { class: 'warnbar' }, 'Lead form import: ' + c.leadSyncError),
     f,
     h('label', {}, sync, ' Sync automatically every 3 hours'),
     h('label', {}, pause, ' Auto-pause lead campaigns that spend for 14 days with no leads'));
@@ -701,7 +813,33 @@ MODULES.adcreatives = { title: 'Creatives & A/B Tests', render: listModule({
   cols: [{ k: 'name' }, { k: 'variant', pill: true }, { k: 'campaign.name', label: 'Campaign' }, { k: 'type' }, { k: 'headline' }, { k: 'status', pill: true }],
   fields: [{ k: 'campaign', type: 'ref', src: '/ads/campaigns', label: 'Campaign', req: true, createOnly: true }, { k: 'name', req: true }, { k: 'variant', label: 'Variant (A, B, C…)' }, { k: 'type', type: 'select', opts: ['image', 'video', 'carousel', 'text'] },
     { k: 'headline' }, { k: 'body', type: 'textarea', label: 'Ad copy' }, { k: 'cta', label: 'Call to action' }, { k: 'mediaUrl', label: 'Image/video URL' }, { k: 'landingUrl' }, { k: 'status', type: 'select', opts: ['active', 'paused', 'rejected'], editOnly: true }],
-  barExtra: [{ label: 'Compare A/B', run: async () => {
+  barExtra: [{ label: '✨ Write with AI', show: () => can('ads', 'c'), run: async (reload) => {
+    const camps = (await api('/ads/campaigns?limit=100')).data;
+    const f = form([
+      { k: 'campaignId', type: 'select', opts: camps.map((c) => c._id), label: 'Campaign (to save the variants to)' },
+      { k: 'product', label: 'Product / service', req: true }, { k: 'audience', label: 'Who it is for (city, age, interest…)' }, { k: 'offer', label: 'Offer (only real ones; the AI never invents discounts)' },
+      { k: 'language', type: 'select', opts: ['English', 'Hinglish', 'Hindi', 'Marathi', 'Gujarati', 'Tamil', 'Telugu', 'Bengali'], req: true }, { k: 'tone', type: 'select', opts: ['friendly', 'premium', 'urgent', 'professional', 'fun'], req: true },
+      { k: 'platform', type: 'select', opts: ['meta', 'google'], req: true }, { k: 'count', type: 'number', label: 'How many variants (1-6)' }, { k: 'landingUrl', label: 'Landing page URL' },
+    ], { count: 3 });
+    const sel = f.querySelector('select'); [...sel.options].forEach((o) => { const c = camps.find((x) => x._id === o.value); if (c) o.textContent = c.name; });
+    const out = h('div', { style: 'margin-top:12px' });
+    let last;
+    modal('Write ad copy with AI', h('div', {}, f, out), [
+      { label: '✨ Generate', keep: true, run: async () => {
+        setKids(out, h('p', { class: 'muted' }, 'Writing…'));
+        last = { ...f.values(), save: false };
+        const r = await api('/ads/ai/copy', { method: 'POST', body: last });
+        setKids(out, h('p', { class: 'muted' }, `by ${r.engine === 'heuristic' ? 'rules (AI unavailable)' : r.engine}`), r.variants.map((v, i) => h('div', { class: 'kcard' }, h('b', {}, `${'ABCDEF'[i]} · ${v.headline}`), h('span', { class: 'muted' }, ` (${v.angle})`), h('p', { style: 'margin:4px 0' }, v.body), pill(v.cta))));
+        last.variants = r.variants;
+      } },
+      { label: 'Save as creatives', run: async () => {
+        if (!last) throw new Error('Generate first');
+        if (!last.campaignId) throw new Error('Choose a campaign');
+        const r = await api('/ads/ai/copy', { method: 'POST', body: { ...last, save: true } });
+        toast(`${r.saved.length} creatives saved`); reload();
+      } },
+    ], true);
+  } }, { label: 'Compare A/B', run: async () => {
     const camps = (await api('/ads/campaigns?limit=100')).data;
     const sel = h('select', {}, camps.map((c) => h('option', { value: c._id }, c.name))); const out = h('div', { style: 'margin-top:14px' });
     const go = guard(async () => { const x = await api('/ads/creatives/compare/' + sel.value);
@@ -735,6 +873,18 @@ MODULES.adattr = { title: 'Lead Attribution', render: async (root) => {
 
 MODULES.adinsights = { title: 'Ad Insights', render: async (root) => {
   const holder = h('div', {}); root.append(holder);
+  const aiBox = h('div', {});
+  const askAi = guard(async (btn) => {
+    btn.disabled = true; btn.textContent = 'Analysing…';
+    try {
+      const { ai: a } = await api('/ads/insights?ai=1');
+      setKids(aiBox, h('div', { class: 'card' }, h('div', { class: 'hd' }, h('h3', {}, '✨ AI analysis'), h('span', { class: 'muted' }, a.engine === 'heuristic' ? 'AI unavailable, rules used' : `by ${a.engine}`)),
+        h('p', { style: 'margin:0 0 10px' }, a.summary),
+        a.priorities.map((p) => h('div', { class: 'kcard' }, h('div', {}, pill(p.impact === 'high' ? 'urgent' : p.impact), ' ', h('b', {}, p.title), h('span', { class: 'muted' }, ` · ${p.campaign}`)), h('p', { class: 'muted', style: 'margin:4px 0 0' }, p.detail))),
+        can('ads', 'u') && h('div', { style: 'margin-top:12px' }, h('a', { class: 'btn sm sec', href: '#/adai' }, 'Get AI suggestions to approve →'))));
+    } finally { btn.disabled = false; btn.textContent = '✨ Analyse with AI'; }
+  });
+  holder.before(h('div', { class: 'bar' }, h('div', { class: 'grow' }), h('button', { class: 'btn', onclick: (e) => askAi(e.currentTarget) }, '✨ Analyse with AI')), aiBox);
   const load = guard(async () => {
     const r = await api('/ads/insights');
     setKids(holder, h('p', { class: 'muted' }, `Rule-based review of the last ${r.window}. Account averages: CPL ${money(r.accountAvg.cpl)}, CTR ${r.accountAvg.ctr}%, ROAS ${r.accountAvg.roas}x.`),
@@ -742,6 +892,43 @@ MODULES.adinsights = { title: 'Ad Insights', render: async (root) => {
         h('p', { style: 'margin:0 0 4px' }, h('b', {}, i.title)), h('p', { class: 'muted', style: 'margin:0' }, i.detail),
         i.apply && can('ads', 'u') && h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm', onclick: guard(async () => { if (!confirm(i.apply.label + '?')) return; await api(i.apply.path.replace(/^\/ads/, '/ads'), { method: i.apply.method, body: i.apply.body }); toast('Done'); load(); }) }, i.apply.label))))
         : h('div', { class: 'card empty' }, icon('inbox'), h('div', {}, 'All good — nothing needs action right now.')));
+  });
+  load();
+} };
+
+// AI suggestions (from the ai_ad_review workflow step or "Review now"); nothing changes on the ad network until approved.
+MODULES.adai = { title: 'AI Suggestions', render: async (root) => {
+  const approver = ['super_admin', 'admin', 'manager'].includes(S.user.role);
+  const st = { status: 'pending' };
+  const holder = h('div', {});
+  const tabs = h('select', { onchange: (e) => { st.status = e.target.value; load(); } }, [['pending', 'Waiting for approval'], ['applied', 'Applied'], ['rejected', 'Rejected'], ['failed', 'Failed'], ['', 'All']].map(([v, l]) => h('option', { value: v }, l)));
+  const review = guard(async (btn) => {
+    btn.disabled = true; btn.textContent = 'AI is reviewing…';
+    try {
+      const r = await api('/ads/ai/review', { method: 'POST', body: {} });
+      const n = r.results.filter((x) => x.recommendation).length;
+      toast(n ? `${n} new suggestion(s)` : 'AI reviewed every campaign: nothing to change right now');
+      modal('AI review', h('div', {}, r.results.map((x) => h('div', { class: 'kcard' }, h('b', {}, x.campaign), ' ', x.skipped ? h('span', { class: 'muted' }, x.skipped) : pill(x.action === 'keep' ? 'keep' : x.label), x.reason && h('p', { class: 'muted', style: 'margin:4px 0 0' }, x.reason)))));
+      load();
+    } finally { btn.disabled = false; btn.textContent = '✨ Review all campaigns now'; }
+  });
+  root.append(h('p', { class: 'muted', style: 'margin:0 0 12px' }, 'The AI reads each campaign\'s last 7 days against your account average and suggests pausing, resuming or changing the daily budget. Nothing changes on Google or Meta until a manager approves. Add the "AI: review ad campaigns after each sync" template under Automation to get suggestions automatically.'),
+    h('div', { class: 'bar' }, tabs, h('div', { class: 'grow' }), can('ads', 'u') && h('button', { class: 'btn', onclick: (e) => review(e.currentTarget) }, '✨ Review all campaigns now')), holder);
+  const decide = (r, path) => guard(async () => { const x = await api(`/ads/recommendations/${r._id}/${path}`, { method: 'POST' }); toast(x.status === 'failed' ? `Failed: ${x.error}` : x.status === 'applied' ? 'Applied on the ad network' : 'Rejected', x.status === 'failed'); load(); });
+  const what = (r) => (r.action === 'budget' ? `Daily budget ${money(r.currentBudget)} → ${money(r.dailyBudget)}` : r.action === 'pause' ? 'Pause campaign' : 'Resume campaign');
+  const load = guard(async () => {
+    const { data } = await api('/ads/recommendations' + (st.status ? `?status=${st.status}` : ''));
+    setKids(holder, data.length ? data.map((r) => h('div', { class: 'card' },
+      h('div', { class: 'hd' }, h('h3', {}, r.campaign?.name || '(deleted campaign)'), pill(r.status)),
+      h('p', { style: 'margin:0 0 4px' }, h('b', {}, what(r)), h('span', { class: 'muted' }, ` · confidence ${Math.round((r.confidence || 0) * 100)}% · ${r.engine === 'heuristic' ? 'rules' : r.engine} · ${fmtDate(r.createdAt)}`)),
+      h('p', { class: 'muted', style: 'margin:0' }, r.reason),
+      r.stats && h('p', { class: 'muted', style: 'margin:6px 0 0;font-size:12px' }, `7 days: spend ${money(r.stats.spend)}, leads ${r.stats.leads ?? 0}, CPL ${money(r.stats.cpl)}, CTR ${r.stats.ctr ?? 0}%, ROAS ${r.stats.roas ?? 0}x · account CPL ${money(r.stats.accountCpl)}`),
+      r.error && h('p', { style: 'margin:6px 0 0;color:var(--bad)' }, r.error),
+      r.decidedBy && h('p', { class: 'muted', style: 'margin:6px 0 0' }, `${r.status} by ${r.decidedBy.name} · ${fmtDate(r.decidedAt)}`),
+      r.status === 'pending' && (approver
+        ? h('div', { style: 'margin-top:12px;display:flex;gap:8px' }, h('button', { class: 'btn sm', onclick: decide(r, 'approve') }, '✓ Approve & apply'), h('button', { class: 'btn sm sec', onclick: decide(r, 'reject') }, 'Reject'))
+        : h('p', { class: 'muted', style: 'margin:8px 0 0' }, 'Waiting for a manager to approve.'))))
+      : h('div', { class: 'card empty' }, icon('inbox'), h('div', {}, st.status === 'pending' ? 'No suggestions waiting. Press "Review all campaigns now" or let the automation do it after each sync.' : 'Nothing here yet.')));
   });
   load();
 } };
@@ -1018,7 +1205,7 @@ MODULES.myspace = { title: 'My Space', render: async (root) => {
 } };
 
 // Menu per role panel (the API still enforces permissions on every call).
-const ADS = ['adsdash', 'adcampaigns', 'adcreatives', 'admetrics', 'adaccounts', 'adattr', 'adinsights', 'adutm'];
+const ADS = ['adsdash', 'adcampaigns', 'adcreatives', 'admetrics', 'adaccounts', 'adattr', 'adinsights', 'adai', 'adutm'];
 const HRP = ['hrdash', 'hremp', 'hrattend', 'hrleave', 'hrholidays', 'hrpayroll', 'hrsettings'];
 // Communication Hub pages live in hub.js.
 const HUB = ['commdash', 'inbox', 'bulksms', 'bulkwa', 'ivrcalls', 'ivrflows', 'calllogs', 'aibot', 'intentmap', 'providers', 'dnd'];
@@ -1057,7 +1244,7 @@ const SUBS = {
   hrsettings: 'Shift timings, leave quotas, PF and tax rules', myspace: 'Punch in/out, apply for leave and view your payslips',
   adsdash: 'Spend, leads and return across all ad platforms', adcampaigns: 'Plan, launch and control ad campaigns', adcreatives: 'Ad creatives and A/B test results',
   admetrics: 'Daily spend and results from your ad networks', adaccounts: 'Connected ad accounts and monthly budgets', adattr: 'Leads and revenue each campaign really produced',
-  adinsights: 'Recommended actions based on recent results',
+  adinsights: 'Recommended actions based on recent results', adai: 'AI suggestions to pause, resume or rebudget campaigns: you approve',
   commdash: 'Bulk messaging, AI conversations and IVR calls at a glance', inbox: 'WhatsApp & SMS chats - the AI answers first, agents take over',
   bulksms: 'Send SMS to CRM segments or uploaded lists', bulkwa: 'WhatsApp broadcasts with templates and media', ivrcalls: 'Automated voice call campaigns driven by IVR flows',
   ivrflows: 'Design menus, AI voice agents, transfers and voicemail', calllogs: 'Every IVR call with transcript, intent and AI summary',

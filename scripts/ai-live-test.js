@@ -5,6 +5,7 @@ process.env.SCHEDULER_ENABLED = 'false';
 process.env.WEBHOOK_SECRET = 'dev-webhook-secret';
 process.env.TWILIO_ACCOUNT_SID = '';
 process.env.SMTP_HOST = '';
+process.env.PUBLIC_URL = '';
 
 const assert = require('assert');
 const mongoose = require('mongoose');
@@ -297,7 +298,7 @@ const show = (label, v) => console.log(`       ${label}: ${String(typeof v === '
     assert(s.verbs.some((v) => v.gather?.input === 'speech'));
     s = (await call('POST', `/api/hub/ivr/simulate/${id}`, { speech: 'I need a wardrobe for my bedroom, what does it cost?' }, admin)).body;
     const said = s.verbs.map((v) => v.say || v.gather?.prompt || '').join(' ');
-    assert(/45,?000/.test(said), `AI did not answer from the knowledge base: ${said}`);
+    assert(/45,?000|forty[- ]five thousand/i.test(said), `AI did not answer from the knowledge base: ${said}`); // voice may spell numbers out
     s = (await call('POST', `/api/hub/ivr/simulate/${id}`, { speech: 'Okay, please have someone call me back on Monday morning' }, admin)).body;
     if (!s.done) s = (await call('POST', `/api/hub/ivr/simulate/${id}/hangup`, null, admin)).body;
     const c = await waitFor(async () => { const x = (await call('GET', `/api/hub/ivr/calls/${id}`, null, admin)).body; return x.status === 'completed' && x.summary && x; });
@@ -314,6 +315,66 @@ const show = (label, v) => console.log(`       ${label}: ${String(typeof v === '
     llm(r);
     assert.equal(r.sentiment, 'negative');
     assert(r.summary);
+  });
+
+  // ---------- AI for ads ----------
+  const adAcc = (await call('POST', '/api/ads/accounts', { platform: 'other', name: 'Manual ads' }, admin)).body;
+  const mkCamp = async (name, dailyBudget, metrics) => {
+    const c = (await call('POST', '/api/ads/campaigns', { account: adAcc._id, name, dailyBudget, objective: 'leads' }, admin)).body;
+    await call('POST', `/api/ads/campaigns/${c._id}/launch`, {}, admin);
+    for (let i = 0; i < metrics.length; i++) await call('POST', '/api/ads/metrics', { campaign: c._id, date: new Date(Date.now() - i * 864e5).toISOString().slice(0, 10), ...metrics[i] }, admin);
+    return c;
+  };
+  const daily = (n, m) => Array.from({ length: n }, () => m);
+  const waste = await mkCamp('Kitchen Leads - Broad', 2000, daily(6, { impressions: 6000, clicks: 90, spend: 1900, leads: 0 }));
+  const star = await mkCamp('Wardrobe Leads - Pune 25-45', 1500, daily(6, { impressions: 5000, clicks: 160, spend: 1400, leads: 9 }));
+
+  await test('AI ad review: wasting campaign -> pause suggestion that waits for approval, then applies', async () => {
+    const r = (await call('POST', '/api/ads/ai/review', { campaignId: waste._id }, admin)).body.results[0];
+    llm(r);
+    assert.equal(r.action, 'pause', JSON.stringify(r));
+    assert.equal((await call('GET', `/api/ads/campaigns/${waste._id}`, null, admin)).body.status, 'active', 'nothing changes before approval');
+    const done = (await call('POST', `/api/ads/recommendations/${r.recommendation}/approve`, null, admin)).body;
+    assert.equal(done.status, 'applied', JSON.stringify(done));
+    assert.equal((await call('GET', `/api/ads/campaigns/${waste._id}`, null, admin)).body.status, 'paused');
+    show('reason', r.reason);
+  });
+
+  await test('AI ad review: cheap-lead campaign is kept or scaled within the cap', async () => {
+    const r = (await call('POST', '/api/ads/ai/review', { campaignId: star._id, maxChangePct: 25 }, admin)).body.results[0];
+    llm(r);
+    assert(['keep', 'budget'].includes(r.action), JSON.stringify(r));
+    if (r.action === 'budget') {
+      const rec = (await call('GET', '/api/ads/recommendations?status=pending', null, admin)).body.data.find((x) => x._id === r.recommendation);
+      assert(rec.dailyBudget > 1500 && rec.dailyBudget <= 1875, `budget ${rec.dailyBudget} outside +25%`);
+    }
+    show('decision', `${r.label || r.action} - ${r.reason}`);
+  });
+
+  await test('AI ad insights and ad copy (Hinglish)', async () => {
+    const ins = (await call('GET', '/api/ads/insights?ai=1', null, admin)).body.ai;
+    llm(ins);
+    assert(ins.summary && ins.priorities.length, JSON.stringify(ins));
+    show('summary', ins.summary);
+    const copy = (await call('POST', '/api/ads/ai/copy', { product: 'Modular kitchen in Pune', audience: 'home owners 28-45', offer: 'Free 3D design', language: 'Hinglish', count: 3 }, admin)).body;
+    llm(copy);
+    assert.equal(copy.variants.length, 3);
+    assert(!/\d+\s?%|₹|rs\.?\s?\d/i.test(copy.variants.map((v) => v.headline + v.body).join(' ')), `invented a price or discount: ${JSON.stringify(copy.variants)}`);
+    show('copy', copy.variants.map((v) => `${v.headline} | ${v.cta}`).join(' || '));
+  });
+
+  await test('workflow: new ad lead gets an AI-written personal WhatsApp', async () => {
+    const tpl = (await call('GET', '/api/workflows/meta', null, admin)).body.templates.findIndex((t) => t.name.startsWith('AI: follow up new ad leads'));
+    const wf = (await call('POST', `/api/workflows/from-template/${tpl}`, null, admin)).body;
+    await call('POST', `/api/workflows/${wf._id}/toggle`, null, admin);
+    const l = (await call('POST', '/api/leads', { name: 'Sneha Kulkarni', phone: '+919855500011', source: 'ads', adCampaign: star._id, customFields: { 'which_product?': 'Sliding wardrobe', city: 'Pune' } }, admin)).body;
+    const run = await waitFor(async () => (await call('GET', `/api/workflows/${wf._id}/runs`, null, admin)).body.find((r) => ['waiting', 'failed', 'completed'].includes(r.status)));
+    assert.equal(run.status, 'waiting', JSON.stringify(run.log));
+    const step = run.log.find((x) => x.step === 'ai_message');
+    assert(step?.ok && step.detail.includes(`written by ${config.ai.provider}`), JSON.stringify(run.log));
+    const msg = (await call('GET', `/api/leads/${l._id}/timeline`, null, admin)).body.find((t) => t.type === 'whatsapp.outbound');
+    assert(msg && /sneha/i.test(msg.message) && /wardrobe/i.test(msg.message), msg?.message);
+    show('whatsapp', msg.message);
   });
 
   const total = llmCalls.length;

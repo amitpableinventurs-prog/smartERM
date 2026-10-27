@@ -320,6 +320,10 @@ const AdAccount = make('AdAccount', {
   autoPause: { type: Boolean, default: false }, // pause lead campaigns that spend with no leads
   lastSyncAt: Date,
   lastSyncError: String,
+  // Meta lead forms (instant forms) are pulled every few minutes; leads newer than lastLeadAt are imported.
+  lastLeadSyncAt: Date,
+  lastLeadAt: Date,
+  leadSyncError: String,
 });
 
 const AdCampaign = make('AdCampaign', {
@@ -342,6 +346,7 @@ const AdCampaign = make('AdCampaign', {
   externalId: String, // campaign id on the ad network; set = linked, status/budget changes are pushed there
   externalBudgetId: String, // Google Ads campaign budget resource name
   syncError: String,
+  aiReviewedAt: Date, // last AI review (the ai_ad_review step runs at most every few hours per campaign)
 }, (s) => s.index({ company: 1, 'utm.campaign': 1 }).index({ company: 1, account: 1, externalId: 1 }));
 
 const AdCreative = make('AdCreative', {
@@ -371,6 +376,24 @@ const AdMetric = make('AdMetric', {
   conversions: { type: Number, default: 0, min: 0 },
   revenue: { type: Number, default: 0, min: 0 },
 }, (s) => s.index({ company: 1, campaign: 1, creative: 1, date: 1 }, { unique: true }).index({ company: 1, date: -1 }));
+
+// An AI suggestion for a campaign (pause, resume or a budget change). Nothing reaches the ad network until a manager approves it.
+const AdRecommendation = make('AdRecommendation', {
+  ...scoped,
+  campaign: { type: ObjectId, ref: 'AdCampaign', required: true, index: true },
+  action: { type: String, enum: ['pause', 'resume', 'budget'], required: true },
+  currentBudget: Number,
+  dailyBudget: Number, // proposed, for action = budget
+  reason: String,
+  confidence: Number,
+  engine: String, // gemini | openai | heuristic
+  source: { type: String, enum: ['workflow', 'manual'], default: 'workflow' },
+  stats: { type: Object, default: {} }, // the numbers the AI looked at
+  status: { type: String, enum: ['pending', 'applied', 'rejected', 'failed', 'expired'], default: 'pending', index: true },
+  decidedBy: { type: ObjectId, ref: 'User' },
+  decidedAt: Date,
+  error: String,
+});
 
 const Employee = make('Employee', {
   ...scoped,
@@ -612,7 +635,7 @@ const OptOut = make('OptOut', {
 module.exports = {
   ChannelProvider, BotConfig, Broadcast, BroadcastRecipient, Conversation, IvrFlow, IvrCall, OptOut, HUB_CHANNELS,
   Employee, Attendance, LeaveRequest, Holiday, PayrollRun, Payslip,
-  AdAccount, AdCampaign, AdCreative, AdMetric,
+  AdAccount, AdCampaign, AdCreative, AdMetric, AdRecommendation,
   ROLES, LEAD_STAGES, CHANNELS,
   Company, Owner, Device, User, Pipeline, Lead, Customer, Deal, Task, Communication, Template,
   Campaign, CampaignEnrollment, Workflow, WorkflowRun, Activity, AuditLog, Notification, Webhook,
