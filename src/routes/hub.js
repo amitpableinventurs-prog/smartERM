@@ -99,7 +99,7 @@ function providerView(req, channel, p) {
   };
 }
 
-router.get('/providers/meta', authorize('hubsetup', 'r'), (_req, res) => res.json({ fields: providers.FIELDS, allowed: providers.ALLOWED }));
+router.get('/providers/meta', authorize('hubsetup', 'r'), (_req, res) => res.json({ fields: providers.FIELDS, allowed: providers.ALLOWED, serverTwilio: !!providers.serverTwilio() }));
 
 router.get('/providers', authorize('hubsetup', 'r'), async (req, res) => {
   const list = await M.ChannelProvider.find({ company: req.companyId }).select('+credentials');
@@ -149,6 +149,43 @@ router.post('/providers/:channel/test', authorize('hubsetup', 'u'), validate(z.o
     if (prov.doc) await M.ChannelProvider.updateOne({ _id: prov.doc._id }, { lastError: e.message.slice(0, 300) });
     throw new HttpError(424, `Test failed: ${e.message}`);
   }
+});
+
+// ----- Voice: one-click connect of the Twilio account in .env -----
+async function serverTwilioAccount() {
+  const cfg = providers.serverTwilio();
+  if (!cfg) throw new HttpError(404, 'TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are not set in .env');
+  try { return { cfg, account: await providers.twilioAccount(cfg) }; } catch (e) { throw new HttpError(424, `Twilio: ${e.message}`); }
+}
+
+router.get('/providers/voice/twilio', authorize('hubsetup', 'u'), async (_req, res) => {
+  const { account } = await serverTwilioAccount();
+  res.json({ ...account, publicUrl: config.publicUrl, publicUrlOk: providers.isPublicUrl(config.publicUrl) });
+});
+
+// Saves Twilio as the voice provider with the chosen caller ID. A bought number is also pointed at this
+// company's IVR (when PUBLIC_URL is public) so incoming calls are answered without touching the Twilio console.
+router.post('/providers/voice/twilio', authorize('hubsetup', 'u'), validate(z.object({ from: z.string().min(6).max(30), inboundFlow: oid.nullable().optional() })), async (req, res) => {
+  const { cfg, account } = await serverTwilioAccount();
+  const num = account.numbers.find((n) => n.number === req.body.from);
+  if (!num) throw new HttpError(400, `${req.body.from} is not a number or verified caller ID on this Twilio account`);
+  if (req.body.inboundFlow && !(await M.IvrFlow.exists({ _id: req.body.inboundFlow, company: req.companyId }))) throw new HttpError(400, 'IVR flow not found');
+  const p = (await M.ChannelProvider.findOne({ company: req.companyId, channel: 'voice' }).select('+credentials')) || new M.ChannelProvider({ company: req.companyId, channel: 'voice' });
+  // The .env account is shared, so a number already answering for another company stays with it.
+  const owner = /\/api\/webhooks\/comm\/(\w+)\/voice/.exec(num.voiceUrl || '')?.[1];
+  if (owner && owner !== p.webhookToken && (await M.ChannelProvider.exists({ webhookToken: owner, company: { $ne: req.companyId } }))) {
+    throw new HttpError(409, `${num.number} already answers calls for another company. Pick another number.`);
+  }
+  p.set({ provider: 'twilio', from: num.number, active: true, credentials: providers.seal(cfg), lastError: undefined });
+  if (req.body.inboundFlow !== undefined) p.inboundFlow = req.body.inboundFlow || undefined;
+  const hooks = `${config.publicUrl}/api/webhooks/comm/${p.webhookToken}`;
+  let inbound = 'off';
+  if (num.owned && providers.isPublicUrl(config.publicUrl)) {
+    try { await providers.twilioPointNumber(cfg, num.sid, `${hooks}/voice`, `${hooks}/voice/status`); } catch (e) { throw new HttpError(424, `Twilio: ${e.message}`); }
+    inbound = 'on';
+  } else if (num.owned) inbound = 'needs_public_url';
+  await p.save();
+  res.json({ ...providerView(req, 'voice', p), inbound, trial: account.trial });
 });
 
 // ================= AI bot & intent mapping =================

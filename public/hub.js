@@ -757,9 +757,29 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
         const r = await api(`/hub/providers/${p.channel}/test`, { method: 'POST', body: { to: testTo.value, ...(tpl && { template: tpl }) } });
         toast(`Test ${r.status} via ${r.provider}${r.providerId ? ' · id ' + r.providerId : ''}`);
       });
+      // Voice: the Twilio account from .env in one click; a bought number is pointed at the IVR for incoming calls.
+      const connectTwilio = guard(async () => {
+        const a = await api('/hub/providers/voice/twilio');
+        const head = h('p', { class: 'muted' }, `Twilio account ${a.name}${a.trial ? ' (trial)' : ''}${a.balance ? ' · balance ' + a.balance : ''}`);
+        const notes = [
+          !a.publicUrlOk && h('div', { class: 'warnbar' }, `Twilio cannot reach PUBLIC_URL (${a.publicUrl || 'not set'}), so real calls will fail. For local testing run "npm run tunnel", then connect again.`),
+          a.trial && h('div', { class: 'infobar' }, 'Trial account: Twilio only calls numbers verified in its console, and callers hear a short trial notice before your IVR.'),
+        ];
+        if (!a.numbers.length) {
+          return modal('Connect Twilio', h('div', {}, head, h('p', {}, 'This Twilio account has no phone number yet. In the Twilio console buy one under Phone Numbers › Buy a number, or add your own mobile under Verified Caller IDs (outbound calls only). Then click Connect Twilio again.'), notes));
+        }
+        const num = el.select(a.numbers.map((n) => [n.number, `${n.number} · ${n.owned ? 'Twilio number' : 'verified caller ID, outbound only'}`]), a.numbers.some((n) => n.number === p.from) ? p.from : undefined);
+        const inFlow = el.select([['', '— the flow marked "inbound default" —'], ...flows.map((f) => [f._id, f.name])], p.inboundFlow || '');
+        modal('Connect Twilio', h('div', {}, head, fld('Caller ID', num, 'Calls show this number. A Twilio number also answers incoming calls with your IVR.'), fld('Inbound calls are answered by', inFlow), notes), [{ label: 'Connect', run: async () => {
+          const r = await api('/hub/providers/voice/twilio', { method: 'POST', body: { from: num.value, inboundFlow: inFlow.value || null } });
+          draw(r);
+          toast(r.inbound === 'on' ? `Connected: calls to ${r.from} are answered by your IVR` : r.inbound === 'needs_public_url' ? 'Connected for outbound calls. Incoming calls start once PUBLIC_URL is public and you connect again.' : 'Connected for outbound calls');
+        } }]);
+      });
       setKids(box,
         h('div', { class: 'hd' }, h('h3', { class: 'ttl-ic' }, icon(p.channel === 'sms' ? 'bulksms' : p.channel === 'whatsapp' ? 'bulkwa' : 'ivrcalls'), HUB_LABEL[p.channel]),
           p.provider === 'simulated' ? h('span', { class: 'pill paused' }, 'Simulated') : h('span', { class: 'pill ' + (p.active ? 'active' : 'paused') }, NAMES[p.provider].split(' (')[0])),
+        p.channel === 'voice' && meta.serverTwilio && can('hubsetup', 'u') && h('div', { class: 'infobar row' }, h('span', { class: 'grow' }, 'Twilio is set up on this server.'), h('button', { class: 'btn sm', onclick: connectTwilio }, 'Connect Twilio')),
         fld('Provider', prov), fld(FROM[p.channel], from), fieldsBox,
         flowSel && fld('Inbound calls are answered by', flowSel),
         inline(active, 'Active'), help,

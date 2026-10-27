@@ -9,6 +9,7 @@ npm install
 cp .env.example .env      # set MONGODB_URI and the JWT secrets
 npm start                 # or: npm run dev
 npm test                  # end-to-end smoke test (uses an in-memory MongoDB, no setup needed)
+npm run tunnel            # dev server on a public https address, for real Twilio calls from localhost
 ```
 
 Every `/api/*` route except `/api/auth/*` and `/api/webhooks/*` needs `Authorization: Bearer <accessToken>`.
@@ -174,6 +175,8 @@ Everything maps to the CRM. Each phone number is matched to a customer or lead u
 - **Intent Mapping**: for each intent, the CRM actions to run once. Available actions: set lead status (never moves backwards), add tag, create task, notify, assign, hand off, add to DND, send SMS/WhatsApp/email, update field. Automation can also use the `message.intent` and `call.completed` events.
 - **Inbox**: shared WhatsApp/SMS inbox with views for needs agent, AI handling and mine. Agents can take over, hand back to AI, assign, close, use AI-suggested replies and templates, and start new chats. Sales and telecallers see only chats assigned to them; chats with their own leads are assigned to them automatically.
 - **IVR Flows**: steps are say, keypad menu, AI voice agent (speech, knowledge base, goal), transfer, voicemail and hang up. Steps and keypad options can mark intents. The **call simulator** runs a flow in the browser (dial pad, typed or spoken answers, read-aloud) and maps the caller to the CRM like a real call. Real calls use TwiML (Twilio or TwiML-compatible providers).
+- **Twilio voice in one click**: when `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are set in `.env`, Channel Providers › Voice shows **Connect Twilio**. It lists the account's voice numbers and verified caller IDs. Pick one as the caller ID. A bought Twilio number is also pointed at the company's IVR, so incoming calls are answered with no Twilio console setup. Verified caller IDs can only place outbound calls. A number that already answers calls for one company can't be taken by another. Trial accounts can only call numbers verified in Twilio.
+  - Twilio must reach `PUBLIC_URL`, so `localhost` does not work. For local testing, run `npm run tunnel`. It opens a free Cloudflare quick tunnel (needs `cloudflared`) and starts the server with `PUBLIC_URL` set to the tunnel address. The address changes on every run, so click Connect Twilio again for incoming calls.
 - **Call Logs**: every call with its path, keys pressed, transcript, intent, sentiment, AI summary and recording.
 - **DND**: opt-outs come from keywords, IVR choices or intents, and can be added manually. Every send path enforces the list, including workflows; a manual send to a DND number returns `409`.
 

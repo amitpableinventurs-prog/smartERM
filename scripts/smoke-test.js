@@ -966,6 +966,89 @@ async function waitFor(fn, ms = 8000) {
     assert(calls.data.every((x) => x.status === 'simulated'));
   });
 
+  await test('hub: voice connects the .env Twilio account in one click, dials and answers signed calls', async () => {
+    const config = require('../src/config');
+    const crypto = require('crypto');
+    const realFetch = global.fetch, realTwilio = { ...config.twilio };
+    const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
+    const sent = [];
+    let pointedAt = '';
+    global.fetch = async (url, opt = {}) => {
+      const u = String(url);
+      if (!u.startsWith('https://api.twilio.com/')) return realFetch(url, opt);
+      sent.push({ u, auth: opt.headers?.Authorization, form: opt.body && new URLSearchParams(opt.body) });
+      if (u.endsWith('/Accounts/ACtest.json')) return reply({ friendly_name: 'Test account', type: 'Trial' });
+      if (u.includes('/IncomingPhoneNumbers.json')) return reply({ incoming_phone_numbers: [
+        { sid: 'PN1', phone_number: '+15005550006', friendly_name: 'Main', capabilities: { voice: true }, voice_url: pointedAt },
+        { sid: 'PN2', phone_number: '+15005550007', friendly_name: 'SMS only', capabilities: { voice: false } },
+      ] });
+      if (u.includes('/OutgoingCallerIds.json')) return reply({ outgoing_caller_ids: [{ phone_number: '+919800000001', friendly_name: 'My mobile' }] });
+      if (u.endsWith('/Balance.json')) return reply({ balance: '12.50', currency: 'USD' });
+      if (u.endsWith('/IncomingPhoneNumbers/PN1.json')) { pointedAt = new URLSearchParams(opt.body).get('VoiceUrl'); return reply({ sid: 'PN1' }); }
+      if (u.endsWith('/Calls.json')) return reply({ sid: 'CAlive1', status: 'queued' });
+      return reply({ message: 'unexpected Twilio call ' + u }, 500);
+    };
+    try {
+      assert.equal((await call('GET', '/api/hub/providers/meta', null, admin)).body.serverTwilio, false);
+      assert.equal((await call('GET', '/api/hub/providers/voice/twilio', null, admin)).status, 404);
+      Object.assign(config.twilio, { sid: 'ACtest', token: 'tok-secret' });
+      config.publicUrl = 'http://localhost:5077';
+      assert.equal((await call('GET', '/api/hub/providers/meta', null, admin)).body.serverTwilio, true);
+
+      const acct = (await call('GET', '/api/hub/providers/voice/twilio', null, admin)).body;
+      assert.deepEqual(acct.numbers.map((n) => [n.number, n.owned]), [['+15005550006', true], ['+919800000001', false]]); // SMS-only number left out
+      assert.deepEqual([acct.trial, acct.balance, acct.publicUrlOk], [true, '12.50 USD', false]);
+      assert.equal(sent[0].auth, 'Basic ' + Buffer.from('ACtest:tok-secret').toString('base64'));
+      assert.equal((await call('POST', '/api/hub/providers/voice/twilio', { from: '+15005550007' }, admin)).status, 400);
+
+      // localhost PUBLIC_URL: saved for outbound, the number is not pointed, and calls explain why they can't work
+      let r = await call('POST', '/api/hub/providers/voice/twilio', { from: '+15005550006' }, admin);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual([r.body.provider, r.body.from, r.body.inbound], ['twilio', '+15005550006', 'needs_public_url']);
+      assert(!sent.some((x) => x.u.endsWith('/PN1.json')));
+      const t = await call('POST', '/api/hub/providers/voice/test', { to: '+919800000001' }, admin);
+      assert.equal(t.status, 424);
+      assert(t.body.error.includes('npm run tunnel'), t.body.error);
+
+      config.publicUrl = 'https://crm.example.com';
+      r = await call('POST', '/api/hub/providers/voice/twilio', { from: '+15005550006', inboundFlow: hubFlow._id }, admin);
+      assert.equal(r.body.inbound, 'on');
+      assert.equal(pointedAt, r.body.webhooks.inbound);
+      assert.equal(hookPath(pointedAt), voiceHook); // same provider record, same webhook token
+      assert.equal(sent.find((x) => x.u.endsWith('/PN1.json')).form.get('StatusCallback'), r.body.webhooks.status);
+      assert.equal(r.body.lastError, undefined);
+      const stored = await mongoose.model('ChannelProvider').findOne({ channel: 'voice', provider: 'twilio' }).select('+credentials');
+      assert.equal(require('../src/services/providers').unseal(stored.credentials).authToken, 'tok-secret');
+
+      // real outbound IVR call
+      const c = await call('POST', '/api/hub/ivr/call', { flowId: hubFlow._id, phone: '+919800000001' }, admin);
+      assert.equal(c.status, 201, JSON.stringify(c.body));
+      assert.deepEqual([c.body.status, c.body.providerId, c.body.simulated], ['queued', 'CAlive1', false]);
+      const placed = sent.find((x) => x.u.endsWith('/Calls.json')).form;
+      assert.equal(placed.get('From'), '+15005550006');
+      assert.equal(placed.get('Url'), `${r.body.webhooks.inbound}?call=${c.body._id}`);
+
+      // incoming calls must carry Twilio's signature (HMAC of PUBLIC_URL + path + sorted params with the auth token)
+      const params = { From: '+919555500005', CallSid: 'CAin1' };
+      const sig = crypto.createHmac('sha1', 'tok-secret').update(config.publicUrl + voiceHook + Object.keys(params).sort().map((k) => k + params[k]).join('')).digest('base64');
+      const ring = (signature) => fetch(base + voiceHook, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(signature && { 'X-Twilio-Signature': signature }) }, body: new URLSearchParams(params) });
+      assert.equal((await ring()).status, 403);
+      const answered = await ring(sig);
+      assert.equal(answered.status, 200);
+      assert((await answered.text()).includes('<Gather input="dtmf"'));
+
+      // the shared .env account: another company cannot take over a number that already answers for this one
+      const rival = (await call('POST', '/api/auth/register', { companyName: 'Rival', name: 'Rita', email: 'rita@rival.test', password: 'password123' })).body.accessToken;
+      assert.equal((await call('POST', '/api/hub/providers/voice/twilio', { from: '+15005550006' }, rival)).status, 409);
+      assert.equal((await call('POST', '/api/hub/providers/voice/twilio', { from: '+919800000001' }, rival)).body.inbound, 'off'); // caller ID: outbound only
+    } finally {
+      global.fetch = realFetch;
+      Object.assign(config.twilio, realTwilio);
+      config.publicUrl = '';
+      await call('PUT', '/api/hub/providers/voice', { provider: 'simulated' }, admin);
+    }
+  });
+
   await test('hub: panels & permissions for comm_manager, telecaller and sales', async () => {
     const tok = {};
     for (const role of ['comm_manager', 'telecaller']) {

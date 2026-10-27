@@ -85,17 +85,27 @@ function mergeConfig(provider, oldCfg, incoming = {}, table = FIELDS) {
 }
 
 // ---------- resolution ----------
+// The Twilio account in .env (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN), shared by every company on this server.
+const serverTwilio = () => (config.twilio.sid && config.twilio.token ? { accountSid: config.twilio.sid, authToken: config.twilio.token } : null);
+
 async function resolve(company, channel) {
   const p = company && (await M.ChannelProvider.findOne({ company, channel, active: true }).select('+credentials'));
   if (p) return { type: p.provider, from: p.from, cfg: unseal(p.credentials), doc: p };
-  // Legacy: Twilio configured in .env keeps working for SMS/WhatsApp.
-  if (channel !== 'voice' && config.twilio.sid) {
-    return { type: 'twilio', from: channel === 'sms' ? config.twilio.smsFrom : config.twilio.waFrom, cfg: { accountSid: config.twilio.sid, authToken: config.twilio.token } };
-  }
+  // Legacy: Twilio configured in .env keeps working for SMS/WhatsApp. Voice needs a provider record
+  // (its webhook token routes calls to the company): Channel Providers > Voice > Connect Twilio.
+  const env = channel !== 'voice' && serverTwilio();
+  if (env) return { type: 'twilio', from: channel === 'sms' ? config.twilio.smsFrom : config.twilio.waFrom, cfg: env };
   return { type: 'simulated' };
 }
 
 const callbackUrl = (prov, path) => (config.publicUrl && prov.doc ? `${config.publicUrl}/api/webhooks/comm/${prov.doc.webhookToken}/${path}` : undefined);
+
+// Providers call back over the internet, so localhost / LAN addresses never work.
+function isPublicUrl(u) {
+  let url;
+  try { url = new URL(u); } catch { return false; }
+  return /^https?:$/.test(url.protocol) && !/^(localhost|0\.0\.0\.0|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$)|\.(local|localhost)$/i.test(url.hostname);
+}
 
 // ---------- HTTP helpers ----------
 async function post(url, { headers = {}, form, json, method = 'POST' }) {
@@ -181,7 +191,8 @@ async function sendMessage(prov, channel, to, body, opts = {}) {
 // answerUrl must be publicly reachable; the provider fetches TwiML from it when the call is answered.
 async function placeCall(prov, to, { answerUrl, statusUrl }) {
   if (prov.type === 'simulated') return { status: 'simulated', providerId: 'simcall_' + crypto.randomBytes(8).toString('hex') };
-  if (!answerUrl || !/^https?:\/\//.test(answerUrl)) throw new Error('Set PUBLIC_URL in .env so the voice provider can reach this server');
+  if (!config.publicUrl) throw new Error('Set PUBLIC_URL in .env so the voice provider can reach this server');
+  if (!isPublicUrl(answerUrl)) throw new Error(`The voice provider cannot reach PUBLIC_URL (${config.publicUrl}). Use your public https address, or run "npm run tunnel" for local testing`);
   const cfg = prov.cfg;
   if (prov.type === 'twilio') {
     const form = { To: to, From: prov.from, Url: answerUrl, Method: 'POST', Timeout: '30' };
@@ -195,6 +206,31 @@ async function placeCall(prov, to, { answerUrl, statusUrl }) {
   }
   throw new Error(`${prov.type} does not support voice calls`);
 }
+
+// ---------- Twilio account (one-click voice setup) ----------
+const twilioApi = (cfg, path, form) => post(`https://api.twilio.com/2010-04-01/Accounts/${cfg.accountSid}${path}`, { headers: twilioAuth(cfg), form, method: form ? 'POST' : 'GET' });
+
+// Numbers usable as caller ID: voice numbers bought in Twilio (can also answer calls) and verified caller IDs (outbound only).
+async function twilioAccount(cfg) {
+  const [acct, own, verified, balance] = await Promise.all([
+    twilioApi(cfg, '.json'),
+    twilioApi(cfg, '/IncomingPhoneNumbers.json?PageSize=200'),
+    twilioApi(cfg, '/OutgoingCallerIds.json?PageSize=200'),
+    twilioApi(cfg, '/Balance.json').catch(() => null),
+  ]);
+  return {
+    name: acct.friendly_name, trial: acct.type === 'Trial', balance: balance && `${balance.balance} ${balance.currency}`,
+    numbers: [
+      ...own.incoming_phone_numbers.filter((n) => n.capabilities?.voice).map((n) => ({ number: n.phone_number, name: n.friendly_name, sid: n.sid, owned: true, voiceUrl: n.voice_url || '' })),
+      ...verified.outgoing_caller_ids.map((n) => ({ number: n.phone_number, name: n.friendly_name, owned: false })),
+    ],
+  };
+}
+
+// Sets the number's "A call comes in" and call status webhooks in Twilio.
+const twilioPointNumber = (cfg, sid, voiceUrl, statusUrl) => twilioApi(cfg, `/IncomingPhoneNumbers/${sid}.json`, {
+  VoiceUrl: voiceUrl, VoiceMethod: 'POST', StatusCallback: statusUrl, StatusCallbackMethod: 'POST',
+});
 
 // ---------- webhook verification ----------
 const safeEqual = (a = '', b = '') => {
@@ -214,6 +250,6 @@ function metaSignatureOk(appSecret, rawBody, header) {
 }
 
 module.exports = {
-  seal, unseal, FIELDS, ALLOWED, maskedConfig, mergeConfig, resolve, sendMessage, placeCall, callbackUrl,
-  twilioSignatureOk, metaSignatureOk, safeEqual,
+  seal, unseal, FIELDS, ALLOWED, maskedConfig, mergeConfig, resolve, sendMessage, placeCall, callbackUrl, isPublicUrl,
+  serverTwilio, twilioAccount, twilioPointNumber, twilioSignatureOk, metaSignatureOk, safeEqual,
 };
