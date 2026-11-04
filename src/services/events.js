@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { Activity, Notification, Webhook } = require('../models');
 const { accessProblem } = require('../modules');
 const tenants = require('./tenants');
+const errorlog = require('./errorlog');
 
 const logActivity = (company, entity, type, message, meta, by) =>
   Activity.create({ company, entity, type, message, meta, by }).catch(() => {});
@@ -36,7 +37,11 @@ async function emit(company, event, entity, payload = {}) {
   return Promise.allSettled([
     automation.trigger(company, event, entity, payload),
     pushOutboundWebhooks(company, event, { entity, ...payload }),
-  ]).then((r) => r.forEach((x) => x.status === 'rejected' && console.error(`[emit ${event}]`, x.reason?.message)));
+  ]).then((r) => r.forEach((x) => {
+    if (x.status !== 'rejected') return;
+    console.error(`[emit ${event}]`, x.reason?.message);
+    errorlog.background('automation', `event ${event}`, x.reason, { company, context: { entity, payload } });
+  }));
 }
 
 module.exports = { logActivity, notify, emit };

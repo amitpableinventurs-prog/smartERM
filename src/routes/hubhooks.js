@@ -18,6 +18,7 @@ const ivr = require('../services/ivr');
 const { HttpError } = require('../utils/helpers');
 const { accessProblem, hasModule } = require('../modules');
 const tenants = require('../services/tenants');
+const errorlog = require('../services/errorlog');
 
 const router = express.Router();
 router.use(express.urlencoded({ extended: false, limit: '1mb' }));
@@ -25,6 +26,7 @@ router.use(express.urlencoded({ extended: false, limit: '1mb' }));
 async function load(req, channels) {
   const p = await M.ChannelProvider.findOne({ webhookToken: String(req.params.token) }).select('+credentials');
   if (!p || (channels && !channels.includes(p.channel))) throw new HttpError(404, 'Unknown webhook');
+  req.companyId = p.company; // failures from here on show in this company's Error Log
   const co = await tenants.getCompany(p.company);
   if (accessProblem(co) || !hasModule(co, 'hub')) throw new HttpError(403, 'Account suspended or Communication Hub not enabled');
   const cfg = providers.unseal(p.credentials);
@@ -39,7 +41,10 @@ async function load(req, channels) {
 }
 
 const twimlOk = (res) => res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
-const later = (fn) => setImmediate(() => fn().catch((e) => console.error('[hub webhook]', e.message)));
+const later = (req, fn) => setImmediate(() => fn().catch((e) => {
+  console.error('[hub webhook]', e.message);
+  errorlog.background('webhook', `${req.method} ${req.originalUrl.split('?')[0]}`, e, { company: req.companyId, context: { body: req.body } });
+}));
 const s = (v, max = 4000) => (typeof v === 'string' ? v.slice(0, max) : v == null ? undefined : String(v).slice(0, max));
 
 // ---------- messages ----------
@@ -49,12 +54,12 @@ async function message(req, res, channel) {
   if (p.provider === 'twilio') {
     if (!req.body.From) return twimlOk(res);
     // Acknowledge at once (Twilio times out after 15s); the AI reply goes out through the API.
-    later(() => inbox.handleInbound({ company, channel, from: req.body.From, body: s(req.body.Body) || (req.body.NumMedia > 0 ? '[media]' : ''), name: s(req.body.ProfileName, 80), providerId: s(req.body.MessageSid, 80) }));
+    later(req, () => inbox.handleInbound({ company, channel, from: req.body.From, body: s(req.body.Body) || (req.body.NumMedia > 0 ? '[media]' : ''), name: s(req.body.ProfileName, 80), providerId: s(req.body.MessageSid, 80) }));
     return twimlOk(res);
   }
   if (p.provider === 'meta') {
     res.sendStatus(200);
-    later(async () => {
+    later(req, async () => {
       for (const entry of req.body?.entry || []) for (const ch of entry.changes || []) {
         const v = ch.value || {};
         for (const st of v.statuses || []) await inbox.deliveryStatus(company, st.id, st.status, st.errors?.[0]?.title);

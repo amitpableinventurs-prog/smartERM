@@ -17,6 +17,7 @@ const { seal, unseal, maskedConfig, mergeConfig } = require('./providers');
 const { notify, logActivity, emit } = require('./events');
 const { accessProblem, hasModule } = require('../modules');
 const tenants = require('./tenants');
+const errorlog = require('./errorlog');
 const ai = require('./ai');
 const { normalize, phoneKey } = require('../utils/phone');
 
@@ -367,7 +368,7 @@ async function connectDiscovered(company, platform, startId, found, { tokenExpir
     out.push(acc);
   }
   if (syncNow) setImmediate(async () => {
-    for (const a of out) await syncAccount(a, { days: 30 }).catch((e) => console.error(`[adsync first sync ${a._id}]`, e.message));
+    for (const a of out) await syncAccount(a, { days: 30 }).catch((e) => { console.error(`[adsync first sync ${a._id}]`, e.message); logSyncError(a, 'Ad sync', e); });
   });
   return out;
 }
@@ -484,6 +485,7 @@ async function syncLeads(acc) {
     acc.leadSyncError = undefined;
   } catch (e) {
     acc.leadSyncError = e.message.slice(0, 500);
+    logSyncError(acc, 'Lead form sync', e);
   }
   acc.lastLeadSyncAt = new Date();
   await acc.save();
@@ -602,6 +604,9 @@ async function pauseFor(c, note, message) {
 }
 
 // ---------- scheduler ----------
+// Automatic syncs have no request to fail, so their errors go to Admin > Error Log here. Manual "Sync now" errors are logged by the API error handler.
+const logSyncError = (acc, what, e) => errorlog.background('integration', `${what}: ${acc.name}`, e, { company: acc.company, context: { account: String(acc._id), platform: acc.platform, accountId: acc.accountId } });
+
 // Sign-in tokens that expire (60-day Facebook user tokens): one reminder a week before, so sync never just stops.
 async function warnExpiringTokens() {
   const soon = await M.AdAccount.find({ connected: true, tokenExpiresAt: { $lt: new Date(Date.now() + 7 * 864e5) }, tokenWarnedAt: null }).limit(50);
@@ -622,7 +627,7 @@ async function processDue() {
   for (const acc of due) {
     const co = await tenants.getCompany(acc.company);
     if (accessProblem(co) || !hasModule(co, 'ads')) continue;
-    try { await syncAccount(acc); } catch (e) { console.error(`[adsync ${acc._id}]`, e.message); }
+    try { await syncAccount(acc); } catch (e) { console.error(`[adsync ${acc._id}]`, e.message); logSyncError(acc, 'Ad sync', e); }
   }
   // Lead forms are checked more often than campaign numbers, so follow-ups go out within minutes.
   const leadDue = await M.AdAccount.find({

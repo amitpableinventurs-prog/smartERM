@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -17,6 +18,8 @@ const corsList = config.corsOrigin === '*' ? null : config.corsOrigin.split(',')
 
 const app = express();
 app.set('trust proxy', 1);
+// Every request gets an id; failures quote it ("Ref") and Admin > Error Log can be searched by it.
+app.use((req, res, next) => { req.id = crypto.randomBytes(6).toString('hex'); res.set('X-Request-Id', req.id); next(); });
 app.use(helmet());
 // With CORS_ORIGIN set, the desktop app and clients' verified custom domains are still allowed.
 app.use(cors({
@@ -26,6 +29,7 @@ app.use(cors({
     try { host = new URL(origin).hostname; } catch { return cb(null, false); }
     tenants.tenantForHost(host).then((co) => cb(null, !!co), () => cb(null, false));
   },
+  exposedHeaders: ['X-Request-Id'], // the desktop app reads it to tell app errors from proxy errors
 }));
 // Webhook signatures (Meta) are computed over the raw body, so keep it for /api/webhooks.
 app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { if (req.originalUrl.startsWith('/api/webhooks/')) req.rawBody = buf; } }));
@@ -83,6 +87,8 @@ api.use('/company', admin.company);
 api.use('/pipelines', mod('crm'), admin.pipelines);
 api.use('/webhook-subscriptions', admin.webhooks);
 api.use('/audit-logs', admin.auditRouter);
+api.use('/error-logs', admin.errorLogs);
+api.use('/client-errors', admin.clientErrors);
 api.use('/notifications', admin.notifications);
 app.use('/api', api);
 

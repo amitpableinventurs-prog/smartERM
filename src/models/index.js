@@ -288,6 +288,28 @@ const AuditLog = make('AuditLog', {
   ip: String,
 });
 
+// Failures for Admin > Error Log (services/errorlog.js). Repeats of the same error within 10 minutes bump `count`.
+// company is empty for errors outside any company (e.g. a scheduler job failing for everyone).
+const ErrorLog = make('ErrorLog', {
+  company: { type: ObjectId, ref: 'Company', index: true },
+  user: { type: ObjectId, ref: 'User' },
+  source: { type: String, enum: ['api', 'integration', 'webhook', 'scheduler', 'automation', 'client'], default: 'api' },
+  requestIds: { type: [String], index: true }, // the newest 20 occurrences; users quote these as "Ref"
+  status: Number,
+  method: String,
+  path: String,
+  message: String,
+  stack: String,
+  context: Mixed, // query, request body (secrets masked), ip, browser, related record
+  fingerprint: { type: String, index: true },
+  count: { type: Number, default: 1 },
+  lastSeenAt: { type: Date, default: Date.now },
+  resolved: { type: Boolean, default: false },
+}, (s) => {
+  s.index({ company: 1, lastSeenAt: -1 });
+  s.index({ lastSeenAt: 1 }, { expireAfterSeconds: 30 * 86400 }); // kept 30 days after it last happened
+});
+
 const Notification = make('Notification', {
   ...scoped,
   user: { type: ObjectId, ref: 'User', index: true },
@@ -640,5 +662,5 @@ module.exports = {
   AdAccount, AdCampaign, AdCreative, AdMetric, AdRecommendation,
   ROLES, LEAD_STAGES, CHANNELS,
   Company, Owner, Device, User, Pipeline, Lead, Customer, Deal, Task, Communication, Template,
-  Campaign, CampaignEnrollment, Workflow, WorkflowRun, Activity, AuditLog, Notification, Webhook,
+  Campaign, CampaignEnrollment, Workflow, WorkflowRun, Activity, AuditLog, ErrorLog, Notification, Webhook,
 };

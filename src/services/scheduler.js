@@ -5,6 +5,7 @@ const bulk = require('./bulk');
 const ai = require('./ai');
 const adsync = require('./adsync');
 const { emit, notify, logActivity } = require('./events');
+const errorlog = require('./errorlog');
 
 const INACTIVE_DAYS = 30;
 let timer;
@@ -57,7 +58,7 @@ async function dateEvents() {
 
 async function tick() {
   for (const job of [automation.resumeDue, campaigns.processDue, bulk.processDue, overdueAndReminders, inactiveCustomers, dateEvents, adsync.processDue]) {
-    try { await job(); } catch (e) { console.error(`[scheduler:${job.name}]`, e.message); }
+    try { await job(); } catch (e) { console.error(`[scheduler:${job.name}]`, e.message); errorlog.background('scheduler', `scheduler: ${job.name}`, e); }
   }
 }
 

@@ -1075,6 +1075,63 @@ async function waitFor(fn, ms = 8000) {
     assert.equal((await call('GET', '/api/hub/broadcasts', null, other)).body.total, 0);
   });
 
+  await test('error log: failures are traceable by Ref, secrets masked, repeats counted, admins only', async () => {
+    const M = require('../src/models');
+    const reg = (await call('POST', '/api/auth/register', { companyName: 'Errco', name: 'Eva', email: 'eva@err.test', password: 'password123' })).body;
+    const eva = reg.accessToken;
+    await call('POST', '/api/users', { name: 'Sid', email: 'sid@err.test', password: 'password123', role: 'sales' }, eva);
+    const sid = (await call('POST', '/api/auth/login', { email: 'sid@err.test', password: 'password123' })).body.accessToken;
+    const logged = (q, tok = eva) => waitFor(async () => { const r = (await call('GET', `/api/error-logs?resolved=all&q=${encodeURIComponent(q)}`, null, tok)).body; return r.data?.length && r; });
+    const quiet = console.error;
+    const realCreate = M.Template.create;
+    console.error = () => {};
+    try {
+      // a 500 on a POST: the response carries a Ref, the log has the stack and the body with secrets masked
+      M.Template.create = async () => { throw new Error('disk full while saving template'); };
+      const r1 = await call('POST', '/api/templates?from=test', { name: 'Promo', channel: 'sms', body: 'Hi', password: 'hunter22', apiToken: 'tok-123' }, eva);
+      assert.equal(r1.status, 500);
+      assert.match(r1.body.requestId, /^[a-f\d]{12}$/);
+      const list = await logged(r1.body.requestId);
+      assert.equal(list.data.length, 1);
+      const row = list.data[0];
+      assert.equal(row.source, 'api'); assert.equal(row.status, 500); assert.equal(row.path, '/api/templates'); assert.equal(row.user.name, 'Eva');
+      assert.equal(row.stack, undefined, 'list must not ship stacks');
+      const d = (await call('GET', `/api/error-logs/${row._id}`, null, eva)).body;
+      assert.match(d.stack, /disk full/);
+      assert.equal(d.context.body.password, '••••'); assert.equal(d.context.body.apiToken, '••••'); assert.equal(d.context.body.name, 'Promo');
+      assert.equal(d.context.query.from, 'test');
+      // the same failure again is counted on the same row, and both Refs find it
+      const r2 = await call('POST', '/api/templates', { name: 'Promo 2', channel: 'sms', body: 'Hi' }, eva);
+      const again = await waitFor(async () => { const x = (await call('GET', `/api/error-logs/${row._id}`, null, eva)).body; return x.count === 2 && x; });
+      assert.deepEqual(again.requestIds, [r1.body.requestId, r2.body.requestId]);
+      assert.equal((await logged(r2.body.requestId)).data[0]._id, row._id);
+    } finally { M.Template.create = realCreate; console.error = quiet; }
+
+    // a provider that refuses the call (424) is logged as an integration error
+    const gw = await call('PUT', '/api/hub/providers/sms', { provider: 'http', from: 'ERRCO', config: { url: 'http://127.0.0.1:9/send', method: 'POST', contentType: 'json', bodyTemplate: '{"to":"{{to}}","text":"{{body}}"}' } }, eva);
+    assert.equal(gw.status, 200, JSON.stringify(gw.body));
+    const t = await call('POST', '/api/hub/providers/sms/test', { to: '9820011111' }, eva);
+    assert.equal(t.status, 424);
+    assert.match(t.body.error, /Test failed/);
+    assert.equal((await logged(t.body.requestId)).data[0].source, 'integration');
+
+    // the browser reports a proxy's 502 that never reached the app
+    assert.equal((await call('POST', '/api/client-errors', { kind: 'api', status: 502, method: 'POST', path: '/hub/providers/whatsapp/test', message: '502 Bad Gateway from the server or a proxy in front of it', page: 'http://x/#/providers' }, sid)).status, 204);
+    const c = (await logged('Bad Gateway')).data[0];
+    assert.equal(c.source, 'client'); assert.equal(c.status, 502); assert.equal(c.user.name, 'Sid');
+
+    // only admins read it, and only their own company's errors
+    assert.equal((await call('GET', '/api/error-logs', null, sid)).status, 403);
+    assert.equal((await call('GET', '/api/error-logs', null, admin)).body.data.every((e) => e.path !== '/api/templates' || e.user?.name !== 'Eva'), true);
+    assert.equal((await call('GET', `/api/error-logs/${c._id}`, null, admin)).status, 404);
+
+    // resolve, then clear resolved
+    assert.equal((await call('POST', `/api/error-logs/${c._id}/resolve`, {}, eva)).body.resolved, true);
+    assert.equal((await call('GET', '/api/error-logs', null, eva)).body.data.some((e) => e._id === c._id), false, 'resolved hidden by default');
+    assert.equal((await call('DELETE', '/api/error-logs', null, eva)).body.deleted, 1);
+    assert.equal((await call('GET', `/api/error-logs/${c._id}`, null, eva)).status, 404);
+  });
+
   await test('owner console: create client with modules, gates, seats, suspend, login-as', async () => {
     const bcrypt = require('bcryptjs');
     const M = require('../src/models');

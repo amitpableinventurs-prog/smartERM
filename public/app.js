@@ -41,6 +41,7 @@ const ICONS = {
   ai: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
   pipelines: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
   users: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  errors: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
   audit: '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/>',
   company: '<circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8L7 17M17 7l2.8-2.8"/>',
   notifications: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
@@ -98,8 +99,20 @@ async function raw(path, opt = {}) {
   const headers = { ...(opt.body && !opt.csv ? { 'Content-Type': 'application/json' } : {}), ...(opt.csv ? { 'Content-Type': 'text/csv' } : {}), ...(S.access ? { Authorization: 'Bearer ' + S.access } : {}), ...(DESK.deviceId ? { 'X-Device-Id': DESK.deviceId } : {}) };
   return fetch((DESK.apiBase || '') + '/api' + path, { method: opt.method || 'GET', headers, body: opt.csv ? opt.body : opt.body ? JSON.stringify(opt.body) : undefined });
 }
+// Refresh tokens work once, so requests that get 401 together must share one refresh:
+// a second refresh with the same token is rejected and would sign the user out.
+let refreshing = null;
+function refreshSession() {
+  refreshing ||= (async () => {
+    const r = await raw('/auth/refresh', { method: 'POST', body: { refreshToken: S.refresh } });
+    if (!r.ok) throw new Error(r.status === 403 ? (await r.json()).error : 'Session expired');
+    saveSession(await r.json());
+  })().finally(() => { refreshing = null; });
+  return refreshing;
+}
 async function api(path, opt = {}) {
   let res;
+  const sentWith = S.access;
   try { res = await raw(path, opt); } catch (e) {
     // Server unreachable: serve saved data / queue the change (offline.js).
     if (opt.noOffline) throw Object.assign(e, { offline: true });
@@ -107,20 +120,43 @@ async function api(path, opt = {}) {
   }
   Offline.setOffline(false);
   if (res.status === 401 && S.refresh && !path.startsWith('/auth/')) {
-    const r = await raw('/auth/refresh', { method: 'POST', body: { refreshToken: S.refresh } });
-    if (r.ok) { saveSession(await r.json()); res = await raw(path, opt); } else { clearSession(); render(); throw new Error(r.status === 403 ? (await r.json()).error : 'Session expired'); }
+    // Another request may already have refreshed while this one was in flight: just retry with the new token.
+    if (S.access === sentWith) {
+      try { await refreshSession(); } catch (e) { if (S.refresh) { clearSession(); render(); } throw e; }
+    }
+    res = await raw(path, opt);
   }
   const text = await res.text();
   let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
     // Company suspended or licence expired: back to the sign-in screen with the reason.
     if (res.status === 403 && data?.details?.code === 'company_blocked' && S.access) { clearSession(); render(); }
-    throw Object.assign(new Error((data && data.error) || res.statusText), { status: res.status });
+    // A 5xx without our request id never reached the app (e.g. a proxy's 502), so only the browser can report it.
+    if (res.status >= 500 && !res.headers.get('X-Request-Id')) reportError({ kind: 'api', status: res.status, method: opt.method || 'GET', path, message: `${res.status} ${res.statusText || 'error'} from the server or a proxy in front of it` });
+    // Logged failures carry a Ref that admins can look up in Admin > Error Log.
+    const ref = data?.requestId ? ` (Ref ${data.requestId})` : '';
+    throw Object.assign(new Error(((data && data.error) || res.statusText) + ref), { status: res.status, requestId: data?.requestId });
   }
   if ((opt.method || 'GET') === 'GET') Offline.remember(path, data);
   return data;
 }
 const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
+
+// Browser-side failures go to Admin > Error Log (POST /api/client-errors). At most 10 per page load, no repeats.
+const reported = new Set();
+function reportError(e) {
+  const key = `${e.kind}:${e.path || ''}:${e.message}`;
+  if (!S.access || reported.size >= 10 || reported.has(key)) return;
+  reported.add(key);
+  raw('/client-errors', { method: 'POST', body: { page: location.href.slice(0, 500), ...e, message: String(e.message).slice(0, 2000), stack: e.stack && String(e.stack).slice(0, 8000) } }).catch(() => {});
+}
+// Only errors from the panels' own scripts, not from browser extensions.
+const ours = (s) => /\/(app|hub|offline)\.js/.test(s || '');
+window.addEventListener('error', (ev) => { if (ours(ev.filename)) reportError({ kind: 'js', message: ev.message, stack: ev.error?.stack, line: ev.lineno, col: ev.colno }); });
+window.addEventListener('unhandledrejection', (ev) => {
+  const r = ev.reason;
+  if (!r?.status && !r?.offline && ours(r?.stack)) reportError({ kind: 'js', message: 'Unhandled: ' + (r?.message || String(r)), stack: r?.stack });
+});
 
 // ---------- permissions (mirror of server ACL; server is the real gate) ----------
 const ACL = {
@@ -581,6 +617,68 @@ MODULES.audit = { title: 'Audit Log', render: listModule({
   res: 'audit', path: '/audit-logs', title: 'Audit', search: false, noDelete: true,
   cols: [{ k: 'createdAt', label: 'When', date: true }, { k: 'user.name', label: 'User' }, { k: 'method' }, { k: 'path' }, { k: 'status' }],
 }) };
+
+// ================= Error log (admins) =================
+const ERR_SOURCES = { api: 'API', integration: 'Twilio / Meta / Google', webhook: 'Webhook', scheduler: 'Scheduler', automation: 'Automation', client: 'Browser' };
+const sourcePill = (s) => h('span', { class: 'pill ' + s }, s === 'integration' ? 'Provider' : ERR_SOURCES[s] || s);
+const jsonBlock = (v) => h('pre', {}, JSON.stringify(v, null, 2));
+const filled = (o) => o != null && (typeof o !== 'object' || Object.keys(o).length > 0);
+
+async function errorDetails(id, reload) {
+  const e = await api('/error-logs/' + id);
+  const { query, params, body, details, ip, userAgent, role, ...rest } = e.context || {};
+  const kv = (k, v) => v != null && v !== '' && [h('span', { class: 'muted' }, k), h('span', {}, v)];
+  const section = (title, v) => filled(v) && [h('h4', { class: 'errh' }, title), jsonBlock(v)];
+  const forDev = { ref: e.requestIds, source: e.source, status: e.status, request: `${e.method || ''} ${e.path || ''}`.trim(), message: e.message, count: e.count, firstSeen: e.createdAt, lastSeen: e.lastSeenAt, user: e.user && { name: e.user.name, email: e.user.email, role: e.user.role }, context: e.context, stack: e.stack };
+  modal(`Error${e.status ? ' ' + e.status : ''} · ${ERR_SOURCES[e.source] || e.source}`, h('div', {},
+    h('div', { class: 'infobar' }, h('b', {}, e.message)),
+    h('div', { class: 'errkv' },
+      kv('Ref', e.requestIds?.length ? [...e.requestIds].reverse().join(', ') : null),
+      kv('Request', `${e.method || ''} ${e.path || ''}`.trim()),
+      kv('Happened', `${e.count}× · first ${fmtDate(e.createdAt)} · last ${fmtDate(e.lastSeenAt)}`),
+      kv('User', e.user && `${e.user.name} · ${e.user.email} · ${e.user.role}`),
+      kv('IP', ip), kv('Browser', userAgent), kv('State', e.resolved ? 'Resolved' : 'Open')),
+    section('Query string', query), section('URL parameters', params), section('Request body (passwords and tokens masked)', body),
+    section('Details', details), section('Context', rest),
+    e.stack && [h('h4', { class: 'errh' }, 'Stack trace'), h('pre', {}, e.stack)]),
+  [{ label: 'Copy for developer', cls: 'sec', keep: true, run: async () => { await navigator.clipboard.writeText(JSON.stringify(forDev, null, 2)); toast('Copied'); } },
+    can('errors', 'u') && { label: e.resolved ? 'Reopen' : 'Mark resolved', run: async () => { await api(`/error-logs/${id}/resolve`, { method: 'POST', body: { resolved: !e.resolved } }); toast(e.resolved ? 'Reopened' : 'Marked resolved'); reload(); } }].filter(Boolean), true);
+}
+
+MODULES.errors = { title: 'Error Log', render: async (root) => {
+  const st = { page: 1, q: '', source: '', status: '', resolved: 'false' };
+  const holder = h('div', {}), summary = h('p', { class: 'muted', style: 'margin:0 0 12px' });
+  const sel = (key, opts) => h('select', { onchange: (ev) => { st[key] = ev.target.value; st.page = 1; load(); } }, opts.map(([v, l]) => h('option', { value: v, selected: st[key] === v }, l)));
+  root.append(summary, h('div', { class: 'bar' },
+    h('div', { class: 'search' }, icon('search'), h('input', { placeholder: 'Message, URL or Ref… (press Enter)', onkeydown: (ev) => { if (ev.key === 'Enter') { st.q = ev.target.value.trim(); st.page = 1; load(); } } })),
+    h('div', { class: 'grow' }),
+    sel('source', [['', 'All sources'], ...Object.entries(ERR_SOURCES)]),
+    sel('status', [['', 'Any status'], ['5xx', 'Server errors (5xx)'], ['424', 'Provider refused (424)']]),
+    sel('resolved', [['false', 'Open'], ['true', 'Resolved'], ['all', 'Open + resolved']]),
+    h('button', { class: 'btn sec', onclick: () => load() }, 'Refresh'),
+    can('errors', 'd') && h('button', { class: 'btn sec', onclick: guard(async () => { if (!confirm('Delete all resolved errors?')) return; const r = await api('/error-logs', { method: 'DELETE' }); toast(`${r.deleted} deleted`); load(); }) }, 'Clear resolved')),
+  holder);
+
+  const load = guard(async () => {
+    const qs = new URLSearchParams({ page: st.page });
+    for (const k of ['q', 'source', 'status', 'resolved']) if (st[k]) qs.set(k, st[k]);
+    const r = await api('/error-logs?' + qs);
+    summary.textContent = `${r.unresolved ? `${r.unresolved} open error${r.unresolved === 1 ? '' : 's'}.` : 'No open errors.'} Error messages show users a Ref: search for it here. Repeats within 10 minutes are counted on one row; entries are kept 30 days after they last happen.`;
+    const short = (s) => (s && s.length > 110 ? s.slice(0, 110) + '…' : s);
+    const tbl = h('table', {}, h('thead', {}, h('tr', {}, ['Last seen', 'Source', 'Status', 'Where', 'Message', 'Count', 'User', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, r.data.map((e) => h('tr', { style: 'cursor:pointer', onclick: guard(() => errorDetails(e._id, load)) },
+        h('td', {}, fmtDate(e.lastSeenAt)), h('td', {}, sourcePill(e.source), e.resolved && [' ', pill('resolved')]), h('td', {}, e.status ?? '—'),
+        h('td', {}, h('code', {}, `${e.method || ''} ${e.path || ''}`.trim() || '—')), h('td', { title: e.message }, short(e.message)),
+        h('td', {}, e.count > 1 ? `${e.count}×` : '1'), h('td', {}, e.user?.name || '—'),
+        h('td', { class: 'acts-cell' }, h('button', { class: 'btn sm sec' }, 'Details'))))));
+    setKids(holder, h('div', { class: 'card flush' }, h('div', { class: 'tw' }, r.data.length ? tbl : h('div', { class: 'empty' }, icon('inbox'), h('div', {}, st.q || st.source || st.status ? 'No errors match these filters.' : 'Nothing has gone wrong. 🎉'))),
+      r.pages > 1 && h('div', { class: 'pager' },
+        h('span', { class: 'muted' }, `Page ${r.page} of ${r.pages} · ${r.total} errors`),
+        h('div', {}, h('button', { class: 'btn sec sm', disabled: st.page <= 1, onclick: () => { st.page--; load(); } }, '‹ Prev'),
+          h('button', { class: 'btn sec sm', disabled: st.page >= r.pages, onclick: () => { st.page++; load(); } }, 'Next ›')))));
+  });
+  load();
+} };
 
 MODULES.notifications = { title: 'Notifications', render: async (root) => {
   const holder = h('div', {}); root.append(h('div', { class: 'bar' }, h('button', { class: 'btn sec', onclick: guard(async () => { await api('/notifications/read-all', { method: 'POST' }); load(); }) }, 'Mark all read')), holder);
@@ -1230,7 +1328,7 @@ const ADS = ['adsdash', 'adcampaigns', 'adcreatives', 'admetrics', 'adaccounts',
 const HRP = ['hrdash', 'hremp', 'hrattend', 'hrleave', 'hrholidays', 'hrpayroll', 'hrsettings'];
 // Communication Hub pages live in hub.js.
 const HUB = ['commdash', 'inbox', 'bulksms', 'bulkwa', 'ivrcalls', 'ivrflows', 'calllogs', 'aibot', 'intentmap', 'providers', 'dnd'];
-const ALL = ['dashboard', 'leads', 'customers', 'deals', 'tasks', 'communications', 'templates', 'campaigns', 'workflows', 'reports', 'ai', 'pipelines', 'users', 'audit', 'company', ...HUB, ...ADS, ...HRP, 'myspace', 'notifications'];
+const ALL = ['dashboard', 'leads', 'customers', 'deals', 'tasks', 'communications', 'templates', 'campaigns', 'workflows', 'reports', 'ai', 'pipelines', 'users', 'audit', 'errors', 'company', ...HUB, ...ADS, ...HRP, 'myspace', 'notifications'];
 const MENU = {
   ads_manager: [...ADS, 'myspace', 'notifications'],
   hr_manager: [...HRP, 'myspace', 'notifications'],
@@ -1253,13 +1351,13 @@ function applyBranding(color) {
   if (/^#[0-9a-f]{6}$/i.test(color || '')) document.documentElement.style.setProperty('--brand', color);
   else document.documentElement.style.removeProperty('--brand');
 }
-const GROUPS = [['Overview', ['dashboard']], ['Sales', ['leads', 'customers', 'deals', 'tasks']], ['Engage', ['communications', 'templates', 'campaigns', 'workflows']], ['Insights', ['reports', 'ai']], ['Communication Hub', HUB], ['Advertising', ADS], ['People & Payroll', HRP], ['Me', ['myspace']], ['Admin', ['pipelines', 'users', 'audit', 'company']], ['', ['notifications']]];
+const GROUPS = [['Overview', ['dashboard']], ['Sales', ['leads', 'customers', 'deals', 'tasks']], ['Engage', ['communications', 'templates', 'campaigns', 'workflows']], ['Insights', ['reports', 'ai']], ['Communication Hub', HUB], ['Advertising', ADS], ['People & Payroll', HRP], ['Me', ['myspace']], ['Admin', ['pipelines', 'users', 'audit', 'errors', 'company']], ['', ['notifications']]];
 const SUBS = {
   dashboard: 'Your business at a glance', leads: 'Capture, score and move prospects through the pipeline', customers: 'Profiles, purchases and relationship health',
   deals: 'Track opportunities and revenue', tasks: 'Follow-ups, reminders and to-dos', communications: 'Every call, email and message in one place',
   templates: 'Reusable messages with personalisation', campaigns: 'Blasts and multi-step drip sequences', workflows: 'Automate repetitive work with triggers and steps',
   reports: 'Performance, conversion and revenue', ai: 'Smart search, forecasts and churn risk', pipelines: 'Customise your sales stages', users: 'Manage your team and roles',
-  audit: 'Who changed what, and when',
+  audit: 'Who changed what, and when', errors: 'What failed, for whom, and why: trace it by its Ref',
   hrdash: 'Headcount, attendance and payroll at a glance', hremp: 'Employee records, salary and bank details', hrattend: 'Daily roster and monthly attendance sheet',
   hrleave: 'Approve leave and keep balances right', hrholidays: 'Company holidays (not counted as working days)', hrpayroll: 'Run monthly payroll from attendance and publish payslips',
   hrsettings: 'Shift timings, leave quotas, PF and tax rules', myspace: 'Punch in/out, apply for leave and view your payslips',

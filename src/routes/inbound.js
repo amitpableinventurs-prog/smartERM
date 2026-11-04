@@ -17,9 +17,10 @@ const safeEqual = (a = '', b = '') => {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 };
 
-async function companyFromKey(key) {
+async function companyFromKey(req, key) {
   const co = key && (await M.Company.findOne({ apiKey: String(key) }));
   if (!co) throw new HttpError(401, 'Invalid API key');
+  req.companyId = co._id; // failures from here on show in this company's Error Log
   if (accessProblem(co)) throw new HttpError(403, 'Account suspended');
   return co;
 }
@@ -40,7 +41,7 @@ async function newLead(company, fields) {
 
 // Website/landing-page form -> lead. Existing contact (same email/phone) is not duplicated.
 router.post('/form/:apiKey', async (req, res) => {
-  const co = await companyFromKey(req.params.apiKey);
+  const co = await companyFromKey(req, req.params.apiKey);
   const { name, email, phone, organization, message, source, utm_campaign: utmCampaign, utm_source: utmSource, utm_medium: utmMedium, utm_content: utmContent, ...extra } = req.body || {};
   if (!str(name) || !(str(email) || str(phone))) throw new HttpError(400, 'name and email or phone are required');
   const or = [str(email) && { email: email.toLowerCase().trim() }, str(phone) && { phone: phone.trim() }].filter(Boolean);
@@ -67,7 +68,7 @@ router.post('/form/:apiKey', async (req, res) => {
 // city, area, brancharea, pincode, company, date, time, ...) and expects the plain-text reply "RECEIVED".
 // Repeat pushes of the same leadid are ignored; a known phone/email gets a note instead of a duplicate lead.
 router.all('/justdial/:apiKey', express.urlencoded({ extended: false, limit: '100kb' }), async (req, res) => {
-  const co = await companyFromKey(req.params.apiKey);
+  const co = await companyFromKey(req, req.params.apiKey);
   const b = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
   const pick = (...keys) => keys.map((k) => (b[k] == null ? '' : String(b[k]).trim().slice(0, 300))).find(Boolean) || undefined;
   const received = () => res.type('text/plain').send('RECEIVED');
@@ -110,7 +111,7 @@ router.all('/justdial/:apiKey', express.urlencoded({ extended: false, limit: '10
 // Inbound message from WhatsApp/email provider. Matched to a lead/customer by phone/email.
 async function inbound(req, res, channel) {
   requireSecret(req);
-  const co = await companyFromKey(req.body.apiKey);
+  const co = await companyFromKey(req, req.body.apiKey);
   const from = str(req.body.from, 200)?.replace(/^whatsapp:/, '').trim();
   if (!from) throw new HttpError(400, 'from is required');
   const field = channel === 'email' ? 'email' : 'phone';
@@ -135,7 +136,7 @@ async function inbound(req, res, channel) {
 // New integrations should use the per-provider URLs under /api/webhooks/comm/:token.
 router.post('/whatsapp', async (req, res) => {
   requireSecret(req);
-  const co = await companyFromKey(req.body.apiKey);
+  const co = await companyFromKey(req, req.body.apiKey);
   const r = await inbox.handleInbound({ company: co._id, channel: 'whatsapp', from: str(req.body.from, 200), body: str(req.body.body, 8000) || '', name: str(req.body.name, 80) });
   res.status(201).json({ id: r.message?._id, matched: !!r.contact && !r.createdLead, leadCreated: !!r.createdLead, reply: r.reply, intent: r.intent });
 });
@@ -143,7 +144,7 @@ router.post('/email', (req, res) => inbound(req, res, 'email'));
 
 // Website behaviour tracking (page views etc.) for a known contact.
 router.post('/activity/:apiKey', async (req, res) => {
-  const co = await companyFromKey(req.params.apiKey);
+  const co = await companyFromKey(req, req.params.apiKey);
   const email = str(req.body.email)?.toLowerCase();
   if (!email) throw new HttpError(400, 'email is required');
   const lead = await M.Lead.findOne({ company: co._id, email });

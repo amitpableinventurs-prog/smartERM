@@ -92,6 +92,7 @@ For HTTPS on these domains, put Caddy in front of the server using `deploy/Caddy
 | Reports | `GET /api/reports/dashboard` `leads-by-source` `funnel` `revenue` `conversion` `team` `campaigns` `automation` |
 | Import/export | `POST /api/data/import/leads` (CSV body); `GET /api/data/export/leads\|customers` |
 | Admin | `/api/users`, `/api/company` (+`rotate-api-key`), `/api/audit-logs`, `/api/notifications`, `/api/webhook-subscriptions` (outbound, HMAC-signed) |
+| Error log | `GET /api/error-logs` (`?q=` message, URL or Ref; `source`, `status=5xx\|424`, `resolved=true\|all`), `GET /:id`, `POST /:id/resolve`, `DELETE /` (clears resolved); `POST /api/client-errors` (panels report browser-side failures) |
 | Communication Hub | `/api/hub/*`: `overview`, `providers`, `bot` (+ `bot/test`), `broadcasts` (+ `recipients/csv` `recipients/crm` `launch` `pause` `resume` `cancel` `report`), `conversations` (+ `reply` `takeover` `release` `assign` `close` `suggest`), `ivr/flows`, `ivr/calls`, `ivr/call`, `ivr/simulate`, `optouts` |
 | Provider webhooks | `/api/webhooks/comm/:token/sms` `whatsapp` `status` `voice` `voice/step` `voice/status` (full URLs on the Providers page) |
 | Owner (aud=owner token) | `POST /api/owner/login`; `GET /overview` `/modules` `/installer`; `GET/POST /companies`, `GET/PATCH /companies/:id`; `POST /companies/:id/activation-key` `login-as` `domains` `domains/:host/verify`; `DELETE /companies/:id/domains/:host`; `PATCH/DELETE /devices/:id` |
@@ -121,6 +122,15 @@ A workflow is `trigger { event, conditions[] }` + `steps[]`.
   ]
 }
 ```
+
+## Error log
+
+Admin › Error Log (super admins and admins) lists what failed, with what is needed to trace it:
+
+- Recorded: server errors (5xx), calls Twilio / Meta / Google refused (424), background work (scheduler jobs, ad and lead-form sync, webhook processing, automation), and the panels' own script errors and 5xx responses that never reached the app (e.g. a proxy's 502).
+- Each entry has the Ref (request id), user, URL, query, request body with passwords and tokens masked, IP, browser and stack trace. Failed requests return `requestId` and the panels show it as "Ref" in the error message, so a user can quote it and an admin can search for it.
+- The same error again within 10 minutes increases the count on one row. Entries are deleted 30 days after they last happened.
+- Errors that belong to no company (a scheduler job failing for everyone) are stored without a company and are not shown to any company's admins.
 
 ## Notes
 

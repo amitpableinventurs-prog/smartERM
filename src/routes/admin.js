@@ -3,7 +3,8 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { z } = require('zod');
 const M = require('../models');
-const { crud, clean } = require('../utils/crud');
+const { crud, clean, escapeRe } = require('../utils/crud');
+const errorlog = require('../services/errorlog');
 const { authorize } = require('../middleware/auth');
 const { validate, audit } = require('../middleware/common');
 const { HttpError } = require('../utils/helpers');
@@ -124,6 +125,59 @@ auditRouter.get('/', authorize('audit', 'r'), async (req, res) => {
   res.json({ data, page, total });
 });
 
+// ---- Error log (admins only: resource 'errors' is in no other role's ACL) ----
+const errorLogs = express.Router();
+errorLogs.get('/', authorize('errors', 'r'), async (req, res) => {
+  const page = Math.max(1, +req.query.page || 1);
+  const f = { company: req.companyId };
+  if (req.query.source) f.source = String(req.query.source);
+  if (req.query.status === '5xx') f.status = { $gte: 500 };
+  else if (/^\d{3}$/.test(req.query.status || '')) f.status = +req.query.status;
+  if (req.query.resolved !== 'all') f.resolved = req.query.resolved === 'true'; // default: open errors only
+  if (req.query.q) {
+    const q = String(req.query.q).trim();
+    f.$or = [{ requestIds: q }, { message: new RegExp(escapeRe(q), 'i') }, { path: new RegExp(escapeRe(q), 'i') }];
+  }
+  const [data, total, open] = await Promise.all([
+    M.ErrorLog.find(f).select('-stack -context -fingerprint').sort('-lastSeenAt').skip((page - 1) * 25).limit(25).populate('user', 'name'),
+    M.ErrorLog.countDocuments(f),
+    M.ErrorLog.countDocuments({ company: req.companyId, resolved: false }),
+  ]);
+  res.json({ data, page, total, pages: Math.ceil(total / 25), unresolved: open });
+});
+errorLogs.get('/:id', authorize('errors', 'r'), async (req, res) => {
+  const e = await M.ErrorLog.findOne({ _id: req.params.id, company: req.companyId }).populate('user', 'name email role');
+  if (!e) throw new HttpError(404, 'Error not found');
+  res.json(e);
+});
+errorLogs.post('/:id/resolve', authorize('errors', 'u'), async (req, res) => {
+  const e = await M.ErrorLog.findOneAndUpdate({ _id: req.params.id, company: req.companyId }, { resolved: req.body?.resolved !== false }, { returnDocument: 'after' });
+  if (!e) throw new HttpError(404, 'Error not found');
+  res.json(e);
+});
+// Removes the resolved entries; unresolved ones stay until they are dealt with.
+errorLogs.delete('/', authorize('errors', 'd'), async (req, res) => {
+  const r = await M.ErrorLog.deleteMany({ company: req.companyId, resolved: true });
+  res.json({ deleted: r.deletedCount });
+});
+
+// The web panels report their own failures here: script errors, and failed responses that never reached the
+// app (a proxy's 502/504 has no X-Request-Id). Any signed-in user may report; only admins can read the log.
+const clientErrors = express.Router();
+clientErrors.post('/', validate(z.object({
+  kind: z.enum(['js', 'api']), message: z.string().min(1).max(2000), stack: z.string().max(8000).optional(),
+  page: z.string().max(500).optional(), line: z.number().int().optional(), col: z.number().int().optional(),
+  method: z.string().max(10).optional(), path: z.string().max(500).optional(), status: z.number().int().min(0).max(999).optional(),
+})), async (req, res) => {
+  const b = req.body;
+  await errorlog.record({
+    source: 'client', company: req.companyId, user: req.user._id, requestId: req.id,
+    status: b.status, method: b.method, path: b.kind === 'api' ? b.path : b.page, message: b.message, stack: b.stack,
+    context: { kind: b.kind, page: b.page, line: b.line, col: b.col, ip: req.ip, userAgent: req.get('user-agent'), role: req.user.role },
+  });
+  res.status(204).end();
+});
+
 const notifications = express.Router();
 notifications.get('/', authorize('notifications', 'r'), async (req, res) => {
   const f = { company: req.companyId, user: req.user._id };
@@ -140,4 +194,4 @@ notifications.post('/:id/read', authorize('notifications', 'u'), async (req, res
   res.json(n);
 });
 
-module.exports = { users, company, pipelines, webhooks, auditRouter, notifications };
+module.exports = { users, company, pipelines, webhooks, auditRouter, errorLogs, clientErrors, notifications };

@@ -1,5 +1,6 @@
 const { ZodError } = require('zod');
 const { AuditLog } = require('../models');
+const errorlog = require('../services/errorlog');
 
 const validate = (schema, where = 'body') => (req, _res, next) => {
   req[where] = schema.parse(req[where]);
@@ -21,7 +22,10 @@ function errorHandler(err, req, res, _next) {
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Malformed JSON' });
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: status >= 500 ? 'Internal server error' : err.message, details: err.details });
+  // Server errors and refused provider calls go to Admin > Error Log; the user sees the request id as "Ref".
+  const logged = status >= 500 || status === 424;
+  if (logged) errorlog.fromRequest(req, err, status);
+  res.status(status).json({ error: status >= 500 ? 'Internal server error' : err.message, details: err.details, ...(logged && { requestId: req.id }) });
 }
 
 // Records every successful mutating request in the audit log.
