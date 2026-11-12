@@ -13,7 +13,7 @@ const ACL = {
   manager: {
     leads: 'crud', customers: 'crud', deals: 'crud', tasks: 'crud', communications: 'crud',
     templates: 'crud', campaigns: 'crud', workflows: 'crud', pipelines: 'crud', webhooks: 'crud',
-    notifications: 'crud', users: 'r', reports: 'r', dashboard: 'r', ai: 'r', audit: 'r', company: 'r', import: 'c', export: 'r', ads: 'crud',
+    notifications: 'crud', users: 'r', reports: 'r', dashboard: 'r', ai: 'r', company: 'r', import: 'c', export: 'r', ads: 'crud',
     hub: 'r', bulk: 'crud', ivr: 'crud', inbox: 'crud', hubsetup: 'crud',
   },
   sales: {

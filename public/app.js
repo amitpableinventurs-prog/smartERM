@@ -160,7 +160,7 @@ window.addEventListener('unhandledrejection', (ev) => {
 
 // ---------- permissions (mirror of server ACL; server is the real gate) ----------
 const ACL = {
-  manager: { hub: 'r', bulk: 'crud', ivr: 'crud', inbox: 'crud', hubsetup: 'crud', ads: 'crud', leads: 'crud', customers: 'crud', deals: 'crud', tasks: 'crud', communications: 'crud', templates: 'crud', campaigns: 'crud', workflows: 'crud', pipelines: 'crud', users: 'r', reports: 'r', ai: 'r', audit: 'r', company: 'r' },
+  manager: { hub: 'r', bulk: 'crud', ivr: 'crud', inbox: 'crud', hubsetup: 'crud', ads: 'crud', leads: 'crud', customers: 'crud', deals: 'crud', tasks: 'crud', communications: 'crud', templates: 'crud', campaigns: 'crud', workflows: 'crud', pipelines: 'crud', users: 'r', reports: 'r', ai: 'r', company: 'r' },
   sales: { inbox: 'ru', leads: 'cru', customers: 'cru', deals: 'cru', tasks: 'crud', communications: 'cr', templates: 'r', campaigns: 'r', reports: 'r', ai: 'r', pipelines: 'r', users: 'r' },
   ads_manager: { ads: 'crud', leads: 'r', dashboard: 'r', reports: 'r', ai: 'r', templates: 'r' },
   hr_manager: { hr: 'crud', dashboard: 'r', reports: 'r', users: 'r' },
@@ -1335,7 +1335,7 @@ const MENU = {
   comm_manager: [...HUB, 'templates', 'leads', 'myspace', 'notifications'],
   telecaller: ['inbox', 'leads', 'customers', 'tasks', 'ai', 'myspace', 'notifications'],
   super_admin: ALL, admin: ALL,
-  manager: ['dashboard', 'leads', 'customers', 'deals', 'tasks', 'communications', 'templates', 'campaigns', 'workflows', 'reports', 'ai', 'pipelines', 'users', 'audit', ...HUB, ...ADS, 'myspace', 'notifications'],
+  manager: ['dashboard', 'leads', 'customers', 'deals', 'tasks', 'communications', 'templates', 'campaigns', 'workflows', 'reports', 'ai', 'pipelines', 'users', ...HUB, ...ADS, 'myspace', 'notifications'],
   sales: ['dashboard', 'inbox', 'leads', 'customers', 'deals', 'tasks', 'communications', 'reports', 'ai', 'myspace', 'notifications'],
   support: ['dashboard', 'inbox', 'customers', 'tasks', 'communications', 'calllogs', 'leads', 'ai', 'myspace', 'notifications'],
 };

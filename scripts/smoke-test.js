@@ -154,6 +154,11 @@ async function waitFor(fn, ms = 8000) {
     assert(mine2.data.every((x) => x.assignedTo._id === salesId));
     assert.equal((await call('POST', `/api/leads/${leadId}/assign`, { userId: salesId }, salesTok)).status, 403);
     assert.equal((await call('GET', '/api/audit-logs', null, salesTok)).status, 403);
+    // The audit log is for super admins and admins only, not managers.
+    await call('POST', '/api/users', { name: 'Mia Manager', email: 'mia@acme.test', password: 'password123', role: 'manager' }, admin);
+    const mia = (await call('POST', '/api/auth/login', { email: 'mia@acme.test', password: 'password123' })).body.accessToken;
+    assert.equal((await call('GET', '/api/audit-logs', null, mia)).status, 403);
+    assert.equal((await call('GET', '/api/audit-logs', null, admin)).status, 200);
   });
 
   await test('status change, convert, deal pipeline, win, payment', async () => {
