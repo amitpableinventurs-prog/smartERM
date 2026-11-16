@@ -87,6 +87,13 @@ tbody tr{transition:.12s}
 tbody tr:hover{background:var(--soft)}
 tbody tr:last-child td{border-bottom:0}
 td.acts-cell{white-space:nowrap;text-align:right}
+.contact{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.contact span{margin-right:2px}
+.cbtn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;border:1px solid var(--line);background:var(--card);transition:.15s}
+.cbtn .ic{width:15px;height:15px}
+.cbtn.call{color:var(--info)}
+.cbtn.wa{color:#25a244}
+.cbtn:hover{background:var(--soft);transform:translateY(-1px)}
 .empty{text-align:center;padding:44px 20px;color:var(--mute)}
 .empty .ic{width:40px;height:40px;opacity:.5;margin-bottom:8px}
 

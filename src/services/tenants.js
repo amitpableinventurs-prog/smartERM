@@ -47,7 +47,7 @@ async function backfill() {
 }
 
 // What the panels need to know about the signed-in user's company.
-const workspace = (co) => ({ id: co._id, name: co.name, modules: co.modules, branding: co.branding || {}, validUntil: co.validUntil });
+const workspace = (co) => ({ id: co._id, name: co.name, modules: co.modules, branding: co.branding || {}, validUntil: co.validUntil, countryCode: config.defaultCountryCode });
 
 // ---- custom domains ----
 const HOST_RE = /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;

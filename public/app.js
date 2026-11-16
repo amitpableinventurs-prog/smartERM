@@ -64,6 +64,8 @@ const ICONS = {
   myspace: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
   search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/>',
+  whatsapp: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.5 8.5c0 3.3 2.7 6 6 6l1-1.4-1.8-.9-.8.8a4 4 0 0 1-1.9-1.9l.8-.8-.9-1.8z"/>',
   inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
 };
 function icon(name) {
@@ -236,8 +238,30 @@ const LEAD_STAGES = ['new', 'contacted', 'qualified', 'proposal_sent', 'negotiat
 const SOURCES = ['manual', 'website', 'form', 'referral', 'whatsapp', 'sms', 'ivr', 'bulk', 'event', 'ads', 'justdial', 'import'];
 
 function pill(v) { return v == null || v === '' ? '' : h('span', { class: 'pill ' + String(v) }, String(v)); }
+
+// Same rules as the server's utils/phone.js: 10-digit (or 0-prefixed) local numbers get the default country code.
+function e164(raw) {
+  const s = String(raw ?? '').trim().replace(/^(whatsapp|tel|sms):/i, '');
+  const d = s.replace(/\D/g, '');
+  if (d.length < 6) return '';
+  const cc = String(S.user?.workspace?.countryCode || '91');
+  if (s.startsWith('+')) return '+' + d;
+  if (d.startsWith('00')) return '+' + d.slice(2);
+  if (d.length === 10) return '+' + cc + d;
+  if (d.length === 11 && d.startsWith('0')) return '+' + cc + d.slice(1);
+  return '+' + d;
+}
+// Phone number with one-tap Call (tel:) and WhatsApp (wa.me) buttons.
+function contactCell(phone) {
+  const num = e164(phone);
+  if (!num) return phone || '';
+  return h('div', { class: 'contact' }, h('span', {}, phone),
+    h('a', { class: 'cbtn call', href: 'tel:' + num, title: 'Call ' + num, 'aria-label': 'Call ' + num }, icon('phone')),
+    h('a', { class: 'cbtn wa', href: 'https://wa.me/' + num.slice(1), target: '_blank', rel: 'noopener', title: 'WhatsApp ' + num, 'aria-label': 'WhatsApp ' + num }, icon('whatsapp')));
+}
 const cell = (row, c) => {
   const v = get(row, c.k);
+  if (c.contact) return contactCell(v);
   if (c.who) return h('div', { class: 'who' }, avatar(v), h('div', {}, h('b', {}, v), row.email && h('small', {}, row.email)));
   if (c.score) { const col = v >= 70 ? 'var(--ok)' : v >= 40 ? 'var(--warn)' : 'var(--bad)'; return h('span', { class: 'score', style: '--c:' + col }, h('i', {}, h('b', { style: 'width:' + (v || 0) + '%' })), v ?? 0); }
   if (c.pill) return pill(v);
@@ -339,7 +363,7 @@ const userOpts = []; // filled lazily where needed
 
 MODULES.leads = { title: 'Leads', icon: 'Leads', render: listModule({
   res: 'leads', path: '/leads', title: 'Lead', filterField: 'status', filterOpts: LEAD_STAGES,
-  cols: [{ k: 'name', who: true }, { k: 'email' }, { k: 'phone' }, { k: 'source' }, { k: 'status', pill: true }, { k: 'score', score: true }, { k: 'assignedTo.name', label: 'Owner' }],
+  cols: [{ k: 'name', who: true }, { k: 'email' }, { k: 'phone', label: 'Contact', contact: true }, { k: 'source' }, { k: 'status', pill: true }, { k: 'score', score: true }, { k: 'assignedTo.name', label: 'Owner' }],
   fields: [{ k: 'name', req: true }, { k: 'email' }, { k: 'phone' }, { k: 'organization' }, { k: 'source', type: 'select', opts: SOURCES }, { k: 'budget', type: 'number' }, { k: 'status', type: 'select', opts: LEAD_STAGES, editOnly: true, req: true }, { k: 'branch' }, { k: 'tags', type: 'tags' }],
   barExtra: [
     { label: 'Import CSV', show: () => can('leads', 'c'), run: (reload) => { const t = h('textarea', { placeholder: 'name,email,phone,source\nJohn,john@x.com,+1555,website' });
@@ -360,7 +384,7 @@ MODULES.leads = { title: 'Leads', icon: 'Leads', render: listModule({
 
 MODULES.customers = { title: 'Customers', render: listModule({
   res: 'customers', path: '/customers', title: 'Customer', filterField: 'lifecycle', filterOpts: ['prospect', 'active', 'at_risk', 'churned', 'vip'],
-  cols: [{ k: 'name', who: true }, { k: 'email' }, { k: 'phone' }, { k: 'organization' }, { k: 'lifecycle', pill: true }, { k: 'lastActivityAt', label: 'Last activity', date: true }],
+  cols: [{ k: 'name', who: true }, { k: 'email' }, { k: 'phone', label: 'Contact', contact: true }, { k: 'organization' }, { k: 'lifecycle', pill: true }, { k: 'lastActivityAt', label: 'Last activity', date: true }],
   fields: [{ k: 'name', req: true }, { k: 'email' }, { k: 'phone' }, { k: 'organization' }, { k: 'address' }, { k: 'birthday', type: 'datetime' }, { k: 'lifecycle', type: 'select', opts: ['prospect', 'active', 'at_risk', 'churned', 'vip'] }, { k: 'tags', type: 'tags' }],
   actions: [
     { label: 'Timeline', run: (r) => showTimeline('customers', r) },
