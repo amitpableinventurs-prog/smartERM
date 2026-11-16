@@ -37,6 +37,8 @@ if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));
 
 const limiter = (windowMs, max) => rateLimit({ windowMs, max, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests' } });
 
+// Public privacy policy (Meta / Google app review need a stable URL; #data-deletion is the deletion-instructions link).
+app.get(['/privacy', '/privacy-policy'], (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'privacy.html')));
 app.use(express.static(path.join(__dirname, '..', 'public'))); // role-based web panels at /, owner console at /owner.html
 app.use('/downloads', express.static(config.downloadsDir)); // desktop installer
 app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));

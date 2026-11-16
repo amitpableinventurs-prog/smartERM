@@ -20,7 +20,7 @@ if (!ai.hasKey()) {
 
 // Every LLM request is recorded, so a test fails if the app silently fell back to the rule engine.
 // AI_TEST_RPM paces requests to the key's per-minute quota (Gemini free tier: 5 per model).
-const LLM_HOSTS = ['generativelanguage.googleapis.com', 'api.openai.com'];
+const LLM_HOSTS = ['generativelanguage.googleapis.com', 'api.openai.com', 'api.groq.com'];
 const RPM = +process.env.AI_TEST_RPM || (config.ai.provider === 'gemini' ? 5 : 60);
 const llmCalls = [];
 const realFetch = global.fetch;
@@ -73,7 +73,7 @@ const llm = (r) => assert.equal(r.engine, config.ai.provider, `engine was ${r.en
 const show = (label, v) => console.log(`       ${label}: ${String(typeof v === 'string' ? v : JSON.stringify(v)).replace(/\s+/g, ' ').slice(0, 160)}`);
 
 (async () => {
-  console.log(`AI provider: ${config.ai.provider} / ${config.ai.provider === 'gemini' ? config.ai.geminiModel : config.ai.openaiModel}`);
+  console.log(`AI provider: ${config.ai.provider} / ${({ gemini: config.ai.geminiModel, groq: config.ai.groqModel }[config.ai.provider] || config.ai.openaiModel)}`);
   const mongod = await MongoMemoryServer.create({ instance: { launchTimeout: 60e3 } });
   await mongoose.connect(mongod.getUri());
   const app = require('../src/app');

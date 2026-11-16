@@ -117,8 +117,26 @@ async function post(url, { headers = {}, form, json, method = 'POST' }) {
   });
   const text = await res.text();
   let data; try { data = JSON.parse(text); } catch { data = text; }
-  if (!res.ok) throw new Error(`${res.status}: ${String(typeof data === 'string' ? data : JSON.stringify(data)).slice(0, 240)}`);
+  if (!res.ok) {
+    const raw = `${res.status}: ${String(typeof data === 'string' ? data : JSON.stringify(data)).slice(0, 240)}`;
+    const hint = authHint(url, data);
+    throw new Error(hint ? `${hint} (${raw})` : raw);
+  }
   return data;
+}
+
+// Credential failures get a plain "what to do" in front of the provider's raw response.
+function authHint(url, data) {
+  if (/graph\.facebook\.com/.test(url) && data?.error?.code === 190) {
+    return 'Meta access token is no longer valid (expired, revoked, or the Facebook user who created it logged out or changed password). ' +
+      'Create a permanent System User token in Meta Business Settings with whatsapp_business_messaging + whatsapp_business_management and paste it in Channel providers > WhatsApp';
+  }
+  if (/api\.twilio\.com/.test(url) && data?.code === 20003) {
+    return /trial account has expired/i.test(data.message || '')
+      ? 'Twilio trial account has expired. Upgrade it in the Twilio console (or connect a different provider)'
+      : 'Twilio rejected the Account SID / Auth token. Check them in Channel providers';
+  }
+  return '';
 }
 
 const twilioAuth = (cfg) => ({ Authorization: 'Basic ' + Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString('base64') });

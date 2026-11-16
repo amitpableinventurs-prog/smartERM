@@ -1,7 +1,14 @@
 const config = require('../config');
 const { LEAD_STAGES } = require('../models');
 
-const hasKey = () => (config.ai.provider === 'gemini' ? !!config.ai.geminiKey : !!config.ai.openaiKey);
+// OpenAI-compatible chat-completions providers (Groq speaks the same API as OpenAI).
+const OPENAI_COMPAT = {
+  openai: () => ({ url: 'https://api.openai.com/v1/chat/completions', key: config.ai.openaiKey, model: config.ai.openaiModel, label: 'OpenAI' }),
+  groq: () => ({ url: 'https://api.groq.com/openai/v1/chat/completions', key: config.ai.groqKey, model: config.ai.groqModel, label: 'Groq' }),
+};
+const compat = () => (OPENAI_COMPAT[config.ai.provider] || OPENAI_COMPAT.openai)();
+
+const hasKey = () => (config.ai.provider === 'gemini' ? !!config.ai.geminiKey : !!compat().key);
 
 async function llm(system, user, { json = false } = {}) {
   if (config.ai.provider === 'gemini') {
@@ -17,16 +24,17 @@ async function llm(system, user, { json = false } = {}) {
     if (!res.ok) throw new Error(`Gemini ${res.status}`);
     return (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text ?? '';
   }
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  const p = compat();
+  const res = await fetch(p.url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.ai.openaiKey}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${p.key}` },
     body: JSON.stringify({
-      model: config.ai.openaiModel,
+      model: p.model,
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
       ...(json ? { response_format: { type: 'json_object' } } : {}),
     }),
   });
-  if (!res.ok) throw new Error(`OpenAI ${res.status}`);
+  if (!res.ok) throw new Error(`${p.label} ${res.status}`);
   return (await res.json()).choices?.[0]?.message?.content ?? '';
 }
 

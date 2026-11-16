@@ -87,7 +87,7 @@ MODULES.commdash = { title: 'Communication Hub', render: async (root) => {
       d.conversations.needAgent && h('p', {}, h('b', {}, d.conversations.needAgent), ' chat(s) waiting for an agent. ', h('a', { href: '#/inbox' }, 'Open inbox →')),
       (d.broadcasts.running || d.broadcasts.scheduled) && h('p', {}, `${d.broadcasts.running || 0} broadcast(s) sending, ${d.broadcasts.scheduled || 0} scheduled.`),
       sim.length && h('p', {}, h('span', { class: 'pill paused' }, 'Simulated'), ` ${sim.join(', ')} ${sim.length > 1 ? 'are' : 'is'} not connected to a real provider yet. `, can('hubsetup', 'u') && h('a', { href: '#/providers' }, 'Connect providers →')),
-      d.aiMode === 'rules' && h('p', { class: 'muted' }, 'The AI assistant is running on built-in rules (English + Hindi/Hinglish keywords). Add OPENAI_API_KEY or GEMINI_API_KEY for full natural-language answers.'),
+      d.aiMode === 'rules' && h('p', { class: 'muted' }, 'The AI assistant is running on built-in rules (English + Hindi/Hinglish keywords). Add GROQ_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY for full natural-language answers.'),
     ].filter(Boolean);
     const m = d.messages, c = d.calls, cv = d.conversations;
     setKids(holder,
@@ -638,7 +638,7 @@ MODULES.aibot = { title: 'AI Bot & Knowledge', render: async (root) => {
   });
 
   root.append(
-    h('div', { class: aiMode === 'llm' ? 'infobar' : 'warnbar' }, aiMode === 'llm' ? 'AI engine: language model connected — the assistant understands free-form messages in any language.' : 'AI engine: built-in rules (English + Hindi/Hinglish keywords, knowledge-base matching). Add OPENAI_API_KEY or GEMINI_API_KEY in .env for full natural-language understanding.'),
+    h('div', { class: aiMode === 'llm' ? 'infobar' : 'warnbar' }, aiMode === 'llm' ? 'AI engine: language model connected — the assistant understands free-form messages in any language.' : 'AI engine: built-in rules (English + Hindi/Hinglish keywords, knowledge-base matching). Add GROQ_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY in .env for full natural-language understanding.'),
     h('div', { class: 'two' },
       h('div', {},
         h('div', { class: 'card' }, h('h3', {}, 'Let the AI answer automatically on'),

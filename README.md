@@ -15,7 +15,7 @@ npm run tunnel            # dev server on a public https address, for real Twili
 Every `/api/*` route except `/api/auth/*` and `/api/webhooks/*` needs `Authorization: Bearer <accessToken>`.
 Data is isolated per company. Lists accept `?page=&limit=&sort=&q=` plus per-resource filters.
 
-AI works without keys (rule-based fallback; responses say `"engine":"heuristic"`). Set `OPENAI_API_KEY` or `GEMINI_API_KEY` (+ `AI_PROVIDER`) for LLM output.
+AI works without keys (rule-based fallback; responses say `"engine":"heuristic"`). Set `GROQ_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY` (+ `AI_PROVIDER=groq|openai|gemini`) for LLM output.
 Email is logged as `simulated` until SMTP is set. SMS, WhatsApp and voice use the provider chosen per company under Communication Hub › Channel Providers (simulated by default; the `TWILIO_*` variables still work as a fallback for SMS/WhatsApp).
 
 ## Web panels
@@ -181,7 +181,7 @@ Everything maps to the CRM. Each phone number is matched to a customer or lead u
   - Answers inbound SMS/WhatsApp from the knowledge base and detects the intent (greeting, interested, pricing, callback, not interested, complaint, support, human, opt-out, other). It also picks out name, email and call-back time.
   - Hands the chat to an agent on complaints, "talk to a person", low confidence or too many turns. The record owner gets it first, otherwise the least busy agent.
   - STOP and other opt-out keywords are always honoured.
-  - Uses the LLM when `OPENAI_API_KEY`/`GEMINI_API_KEY` is set, otherwise built-in English + Hindi/Hinglish rules.
+  - Uses the LLM when `GROQ_API_KEY`/`OPENAI_API_KEY`/`GEMINI_API_KEY` is set, otherwise built-in English + Hindi/Hinglish rules.
 - **Intent Mapping**: for each intent, the CRM actions to run once. Available actions: set lead status (never moves backwards), add tag, create task, notify, assign, hand off, add to DND, send SMS/WhatsApp/email, update field. Automation can also use the `message.intent` and `call.completed` events.
 - **Inbox**: shared WhatsApp/SMS inbox with views for needs agent, AI handling and mine. Agents can take over, hand back to AI, assign, close, use AI-suggested replies and templates, and start new chats. Sales and telecallers see only chats assigned to them; chats with their own leads are assigned to them automatically.
 - **IVR Flows**: steps are say, keypad menu, AI voice agent (speech, knowledge base, goal), transfer, voicemail and hang up. Steps and keypad options can mark intents. The **call simulator** runs a flow in the browser (dial pad, typed or spoken answers, read-aloud) and maps the caller to the CRM like a real call. Real calls use TwiML (Twilio or TwiML-compatible providers).

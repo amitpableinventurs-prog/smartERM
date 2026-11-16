@@ -528,7 +528,7 @@ function workflowEditor(meta) {
         st.trigger.conditions.map((c, i) => condRow(c, st.trigger.conditions, i)),
         h('button', { class: 'btn sm sec', style: 'margin-top:6px', onclick: () => { st.trigger.conditions.push({ field: 'source', op: 'eq', value: '' }); draw(); } }, '+ Only when…'),
         h('h4', { style: 'margin:18px 0 4px' }, '▶ Do these steps'),
-        st.steps.length ? null : h('p', { class: 'muted', style: 'margin:0' }, 'No steps yet. Tip: ✨ steps use AI (Gemini).'),
+        st.steps.length ? null : h('p', { class: 'muted', style: 'margin:0' }, 'No steps yet. Tip: ✨ steps use AI.'),
         stepList(st.steps, 0));
     }
     const toggle = h('button', { class: 'btn sm sec', style: 'float:right', onclick: () => { jsonMode = !jsonMode; toggle.textContent = jsonMode ? 'Visual editor' : 'Edit as JSON'; draw(); } }, 'Edit as JSON');
@@ -598,7 +598,7 @@ MODULES.ai = { title: 'AI Assistant', render: async (root) => {
   })))).catch((e) => toast(e.message, true));
   api('/ai/churn').then((d) => setKids(c, h('h3', {}, 'Customers at churn risk'), d.length ? table(d) : h('p', { class: 'muted' }, 'No at-risk customers.'))).catch((e) => toast(e.message, true));
   const aiStatus = await api('/ai/status');
-  root.append(h('p', { class: 'muted' }, `AI mode: ${aiStatus.mode}${aiStatus.llmConfigured ? '' : ' (add OPENAI_API_KEY or GEMINI_API_KEY for LLM output)'}`));
+  root.append(h('p', { class: 'muted' }, `AI mode: ${aiStatus.mode}${aiStatus.llmConfigured ? '' : ' (add GROQ_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY for LLM output)'}`));
 } };
 
 MODULES.users = { title: 'Team & Users', render: listModule({
@@ -1410,7 +1410,7 @@ function loginScreen() {
     h('div', { class: 'art' }, h('div', { class: 'brand', style: 'position:relative;margin-bottom:28px' }, h('div', { class: 'logo' }, icon('zap')), artBrand),
       h('h1', {}, 'Sell smarter.', h('br'), 'Automate the rest.'), h('p', {}, 'Leads, customers, deals and campaigns — with automation and AI built in.'),
       h('ul', {}, BULLETS.map(([ic, t]) => h('li', {}, h('span', {}, icon(ic)), t)))),
-    h('div', { class: 'box' }, inner));
+    h('div', { class: 'box' }, inner, h('p', { class: 'muted', style: 'margin:14px 0 0;font-size:12px;text-align:center' }, h('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Privacy Policy'))));
 }
 
 function route() { return (location.hash.replace(/^#\//, '').split('?')[0]) || 'dashboard'; }

@@ -18,6 +18,9 @@ module.exports = {
     openaiModel: env.OPENAI_MODEL || 'gpt-4o-mini',
     geminiKey: env.GEMINI_API_KEY,
     geminiModel: env.GEMINI_MODEL || 'gemini-2.0-flash',
+    // Groq: OpenAI-compatible API, much lower latency than Gemini.
+    groqKey: env.GROQ_API_KEY,
+    groqModel: env.GROQ_MODEL || 'openai/gpt-oss-120b',
   },
   smtp: {
     host: env.SMTP_HOST,

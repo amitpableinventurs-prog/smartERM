@@ -17,6 +17,7 @@ process.env.PUBLIC_URL = '';
 process.env.SMTP_HOST = '';
 process.env.OPENAI_API_KEY = '';
 process.env.GEMINI_API_KEY = '';
+process.env.GROQ_API_KEY = '';
 
 const assert = require('assert');
 const mongoose = require('mongoose');
