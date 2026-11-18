@@ -64,13 +64,15 @@ function heuristicScore(lead, activityCount = 0) {
   if (lead.organization) { s += 5; reasons.push('company known'); }
   const src = SOURCE_WEIGHT[lead.source] ?? 5;
   s += src; reasons.push(`source ${lead.source} (+${src})`);
-  if (lead.budget) { const b = Math.min(20, Math.round(Math.log10(lead.budget + 1) * 4)); s += b; reasons.push(`budget (+${b})`); }
+  const budget = Number(lead.budget);
+  if (budget > 0) { const b = Math.min(20, Math.round(Math.log10(budget + 1) * 4)); s += b; reasons.push(`budget (+${b})`); }
   s += STAGE_WEIGHT[lead.status] ?? 0;
   if (lead.status !== 'new') reasons.push(`stage ${lead.status}`);
   const eng = Math.min(15, activityCount * 3);
   if (eng) { s += eng; reasons.push(`${activityCount} interactions (+${eng})`); }
   if (lead.status === 'lost') s = Math.min(s, 15);
-  return { score: Math.max(0, Math.min(100, Math.round(s))), reason: reasons.join(', ') };
+  // Never NaN: a NaN score cannot be saved ("Cast to Number failed for value NaN at path score").
+  return { score: Number.isFinite(s) ? Math.max(0, Math.min(100, Math.round(s))) : 10, reason: reasons.join(', ') };
 }
 
 async function scoreLead(lead, activityCount = 0) {
@@ -81,7 +83,8 @@ async function scoreLead(lead, activityCount = 0) {
     async () => base,
     { json: true }
   );
-  const score = Math.max(0, Math.min(100, Math.round(+r.score))) || base.score;
+  const n = Math.round(Number(r.score));
+  const score = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : base.score;
   return { score, reason: r.reason || base.reason, engine: r.engine };
 }
 

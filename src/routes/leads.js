@@ -25,6 +25,7 @@ async function scoreAndSave(lead) {
 const c = crud({
   Model: Lead,
   resource: 'leads',
+  spec: 'lead',
   search: ['name', 'email', 'phone', 'organization'],
   filters: ['status', 'source', 'assignedTo', 'branch', 'tags', 'adCampaign'],
   populate: { path: 'assignedTo', select: 'name email' },

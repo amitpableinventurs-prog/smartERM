@@ -81,7 +81,7 @@ function avatar(name, size) {
 function toast(msg, err) {
   const t = h('div', { class: 'toast' + (err ? ' err' : '') }, msg);
   document.body.append(t);
-  setTimeout(() => t.remove(), 3500);
+  setTimeout(() => t.remove(), err ? 6000 : 3500);
 }
 
 // ---------- session & api ----------
@@ -137,7 +137,7 @@ async function api(path, opt = {}) {
     if (res.status >= 500 && !res.headers.get('X-Request-Id')) reportError({ kind: 'api', status: res.status, method: opt.method || 'GET', path, message: `${res.status} ${res.statusText || 'error'} from the server or a proxy in front of it` });
     // Logged failures carry a Ref that admins can look up in Admin > Error Log.
     const ref = data?.requestId ? ` (Ref ${data.requestId})` : '';
-    throw Object.assign(new Error(((data && data.error) || res.statusText) + ref), { status: res.status, requestId: data?.requestId });
+    throw Object.assign(new Error(((data && data.error) || res.statusText) + ref), { status: res.status, requestId: data?.requestId, details: data?.details });
   }
   if ((opt.method || 'GET') === 'GET') Offline.remember(path, data);
   return data;
@@ -184,7 +184,21 @@ function modal(title, body, buttons = [], wide) {
   return close;
 }
 
-function fieldEl(f, val) {
+// Input hints from the field's validation rule (public/rules.js): email/phone keyboards, number and date limits.
+function ruleAttrs(f, r) {
+  if (!r) return {};
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+  if (r.t === 'email') return { type: 'email', inputmode: 'email', autocomplete: 'off', maxlength: 254 };
+  if (r.t === 'phone') return { type: 'tel', inputmode: 'tel', maxlength: 20, placeholder: 'e.g. +91 98765 43210' };
+  if (r.t === 'url') return { type: 'url', placeholder: 'https://…' };
+  if (r.t === 'number') return { min: r.min, max: r.max, step: r.int ? 1 : 'any' };
+  if (r.t === 'date' && r.past === false) return { min: f.type === 'date' ? today : today + 'T00:00' };
+  if (r.t === 'date' && r.future === false) return { max: f.type === 'date' ? today : today + 'T23:59' };
+  if (r.maxLen && f.type !== 'tags') return { maxlength: r.maxLen };
+  return {};
+}
+
+function fieldEl(f, val, rule) {
   if (val && typeof val === 'object' && val._id) val = val._id; // populated reference -> id
   let el;
   if (f.type === 'ref') {
@@ -196,7 +210,7 @@ function fieldEl(f, val) {
   } else if (f.type === 'select') el = h('select', {}, !f.req && h('option', { value: '' }, '—'), f.opts.map((o) => h('option', { value: o }, o)));
   else if (f.type === 'textarea' || f.type === 'json') el = h('textarea', {});
   else if (f.type === 'checkbox') el = h('input', { type: 'checkbox', style: 'width:auto' });
-  else el = h('input', { type: f.type === 'number' ? 'number' : f.type === 'datetime' ? 'datetime-local' : f.type === 'date' ? 'date' : f.type === 'password' ? 'password' : 'text' });
+  else el = h('input', { type: f.type === 'number' ? 'number' : f.type === 'datetime' ? 'datetime-local' : f.type === 'date' ? 'date' : f.type === 'password' ? 'password' : 'text', ...ruleAttrs(f, rule) });
   if (val != null && val !== '') {
     if (f.type === 'checkbox') el.checked = !!val;
     else if (f.type === 'json') el.value = JSON.stringify(val, null, 2);
@@ -208,26 +222,69 @@ function fieldEl(f, val) {
   return el;
 }
 function readField(f, el) {
+  if (el.validity?.badInput) throw new Error('bad input'); // e.g. letters typed into a number or date box
   const v = f.type === 'checkbox' ? el.checked : el.value.trim();
   if (v === '' || v == null) return undefined;
-  if (f.type === 'number') return Number(v);
+  if (f.type === 'number') { const n = Number(v); if (!Number.isFinite(n)) throw new Error('not a number'); return n; }
   if (f.type === 'json') return JSON.parse(v);
   if (f.type === 'tags') return v.split(',').map((s) => s.trim()).filter(Boolean);
-  if (f.type === 'datetime') return new Date(v).toISOString();
+  if (f.type === 'datetime') { const d = new Date(v); if (Number.isNaN(d.getTime())) throw new Error('bad date'); return d.toISOString(); }
   if (f.type === 'date') return v;
   return v;
 }
-function form(fields, row = {}) {
-  const els = fields.map((f) => fieldEl(f, get(row, f.k)));
-  const node = h('div', {}, fields.map((f, i) => [h('label', {}, f.label || f.k, f.req ? ' *' : ''), els[i]]));
+// ---------- validation display ----------
+// A red border and the message under the input, until the input is edited again.
+function clearInvalid(el) {
+  el.classList.remove('invalid');
+  const m = el.nextElementSibling;
+  if (m?.classList.contains('ferr')) m.remove();
+}
+function setInvalid(el, msg) {
+  clearInvalid(el);
+  el.classList.add('invalid');
+  el.after(h('div', { class: 'ferr' }, msg));
+  const off = () => { clearInvalid(el); el.removeEventListener('input', off); el.removeEventListener('change', off); };
+  el.addEventListener('input', off); el.addEventListener('change', off);
+}
+// errs: [{ path, message }] (from Rules.validate or the API's details.fields); els: { path: input }.
+function showErrors(errs, els) {
+  Object.values(els).forEach((el) => el && clearInvalid(el));
+  errs.forEach((e) => els[e.path] && setInvalid(els[e.path], e.message));
+  errs.map((e) => els[e.path]).find(Boolean)?.focus?.();
+}
+const errText = (errs) => errs.map((e) => e.message).join('\n');
+// Checks data against a spec from public/rules.js, marks the inputs and throws (the modal stays open and shows a toast).
+function checkSpec(data, spec, els = {}, opts) {
+  const errs = Rules.validate(data, spec, opts);
+  showErrors(errs, els);
+  if (errs.length) throw new Error(errText(errs));
+  return data;
+}
+
+const fieldLabel = (f) => f.label || f.k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[._]/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+// spec: a validation spec (name) from public/rules.js. values() checks it and marks the bad inputs.
+function form(fields, row = {}, spec) {
+  const rules = (typeof spec === 'string' ? Rules.SPECS[spec] : spec) || {};
+  const els = fields.map((f) => fieldEl(f, get(row, f.k), rules[f.k]));
+  const byPath = Object.fromEntries(fields.map((f, i) => [f.k, els[i]]));
+  const node = h('div', {}, fields.map((f, i) => [h('label', {}, fieldLabel(f), f.req ? ' *' : ''), els[i]]));
+  node.showErrors = (errs) => showErrors(errs, byPath);
   node.values = () => {
-    const out = {};
+    const out = {}, errs = [];
     fields.forEach((f, i) => {
       let v;
-      try { v = readField(f, els[i]); } catch { throw new Error(`${f.label || f.k}: invalid value`); }
-      if (f.req && v === undefined) throw new Error(`${f.label || f.k} is required`);
+      try { v = readField(f, els[i]); } catch {
+        errs.push({ path: f.k, message: f.type === 'number' ? `${fieldLabel(f)} must be a number` : f.type === 'json' ? `${fieldLabel(f)} must be valid JSON` : `${fieldLabel(f)} is not valid` });
+        return;
+      }
+      if (f.req && v === undefined) { errs.push({ path: f.k, message: `${fieldLabel(f)} is required` }); return; }
       if (v !== undefined) setPath(out, f.k, v);
     });
+    const opts = row && row._id ? { partial: true, current: row } : {};
+    for (const e of Rules.validate(out, rules, opts)) if (!errs.some((x) => x.path === e.path)) errs.push(e);
+    showErrors(errs, byPath);
+    if (errs.length) throw new Error(errText(errs));
     return out;
   };
   return node;
@@ -285,14 +342,14 @@ function listModule(cfg) {
     function edit(row) {
       if (cfg.editor) return cfg.editor(row, load); // a module with its own editor (e.g. the workflow builder)
       const fields = cfg.fields.filter((f) => (row ? !f.createOnly : !f.editOnly));
-      const f = form(fields, row || {});
+      const f = form(fields, row || {}, cfg.spec);
       modal((row ? 'Edit ' : 'New ') + cfg.title, f, [{ label: 'Save', run: async () => {
         const body = f.values();
         const q = !row && cfg.forceCreate ? '?force=true' : '';
         try { await api(cfg.path + (row ? '/' + row._id : q), { method: row ? 'PATCH' : 'POST', body }); }
         catch (e) {
           if (!row && /duplicate/i.test(e.message) && confirm(e.message + '\n\nCreate anyway?')) await api(cfg.path + '?force=true', { method: 'POST', body });
-          else throw e;
+          else { if (e.details?.fields) f.showErrors(e.details.fields); throw e; }
         }
         toast('Saved'); load();
       } }]);
@@ -362,7 +419,7 @@ const MODULES = {};
 const userOpts = []; // filled lazily where needed
 
 MODULES.leads = { title: 'Leads', icon: 'Leads', render: listModule({
-  res: 'leads', path: '/leads', title: 'Lead', filterField: 'status', filterOpts: LEAD_STAGES,
+  res: 'leads', path: '/leads', title: 'Lead', spec: 'lead', filterField: 'status', filterOpts: LEAD_STAGES,
   cols: [{ k: 'name', who: true }, { k: 'email' }, { k: 'phone', label: 'Contact', contact: true }, { k: 'source' }, { k: 'status', pill: true }, { k: 'score', score: true }, { k: 'assignedTo.name', label: 'Owner' }],
   fields: [{ k: 'name', req: true }, { k: 'email' }, { k: 'phone' }, { k: 'organization' }, { k: 'source', type: 'select', opts: SOURCES }, { k: 'budget', type: 'number' }, { k: 'status', type: 'select', opts: LEAD_STAGES, editOnly: true, req: true }, { k: 'branch' }, { k: 'tags', type: 'tags' }],
   barExtra: [
@@ -383,13 +440,13 @@ MODULES.leads = { title: 'Leads', icon: 'Leads', render: listModule({
 }) };
 
 MODULES.customers = { title: 'Customers', render: listModule({
-  res: 'customers', path: '/customers', title: 'Customer', filterField: 'lifecycle', filterOpts: ['prospect', 'active', 'at_risk', 'churned', 'vip'],
+  res: 'customers', path: '/customers', title: 'Customer', spec: 'customer', filterField: 'lifecycle', filterOpts: ['prospect', 'active', 'at_risk', 'churned', 'vip'],
   cols: [{ k: 'name', who: true }, { k: 'email' }, { k: 'phone', label: 'Contact', contact: true }, { k: 'organization' }, { k: 'lifecycle', pill: true }, { k: 'lastActivityAt', label: 'Last activity', date: true }],
   fields: [{ k: 'name', req: true }, { k: 'email' }, { k: 'phone' }, { k: 'organization' }, { k: 'address' }, { k: 'birthday', type: 'datetime' }, { k: 'lifecycle', type: 'select', opts: ['prospect', 'active', 'at_risk', 'churned', 'vip'] }, { k: 'tags', type: 'tags' }],
   actions: [
     { label: 'Timeline', run: (r) => showTimeline('customers', r) },
     { label: 'Message', perm: ['communications', 'c'], run: (r) => messageModal('Customer', r) },
-    { label: 'Purchase', perm: ['customers', 'u'], run: (r, reload) => { const f = form([{ k: 'item', req: true }, { k: 'amount', type: 'number' }]); modal('Add purchase', f, [{ label: 'Save', run: async () => { await api(`/customers/${r._id}/purchases`, { method: 'POST', body: f.values() }); toast('Added'); reload(); } }]); } },
+    { label: 'Purchase', perm: ['customers', 'u'], run: (r, reload) => { const f = form([{ k: 'item', req: true }, { k: 'amount', type: 'number' }], {}, 'purchase'); modal('Add purchase', f, [{ label: 'Save', run: async () => { await api(`/customers/${r._id}/purchases`, { method: 'POST', body: f.values() }); toast('Added'); reload(); } }]); } },
     { label: 'Churn risk', perm: ['ai', 'r'], run: async (r) => { const c = await api(`/customers/${r._id}/churn`); modal('Churn risk', h('p', {}, h('b', {}, c.risk + '% '), pill(c.level), ` · ${c.daysInactive} days inactive`)); } },
   ],
 }) };
@@ -405,7 +462,7 @@ MODULES.deals = { title: 'Deals', render: async (root) => {
   root.append(h('div', { class: 'bar' }, h('button', { class: 'btn sec', onclick: () => { list.hidden = false; board.hidden = true; } }, 'List'), h('button', { class: 'btn sec', onclick: guard(showBoard) }, 'Board')), list, board);
   board.hidden = true;
   await listModule({
-    res: 'deals', path: '/deals', title: 'Deal', filterField: 'status', filterOpts: ['open', 'won', 'lost'],
+    res: 'deals', path: '/deals', title: 'Deal', spec: 'deal', filterField: 'status', filterOpts: ['open', 'won', 'lost'],
     cols: [{ k: 'title' }, { k: 'value', money: true }, { k: 'stage' }, { k: 'status', pill: true }, { k: 'customer.name', label: 'Customer' }, { k: 'assignedTo.name', label: 'Owner' }],
     fields: [{ k: 'title', req: true }, { k: 'value', type: 'number' }, { k: 'stage' }, { k: 'probability', type: 'number' }, { k: 'expectedCloseDate', type: 'datetime' }, { k: 'lead', label: 'Lead ID', createOnly: true }, { k: 'customer', label: 'Customer ID', createOnly: true }],
     actions: dealActions,
@@ -428,9 +485,9 @@ MODULES.deals = { title: 'Deals', render: async (root) => {
 } };
 
 MODULES.tasks = { title: 'Tasks', render: listModule({
-  res: 'tasks', path: '/tasks', title: 'Task', filterField: 'status', filterOpts: ['pending', 'in_progress', 'done', 'cancelled'],
+  res: 'tasks', path: '/tasks', title: 'Task', spec: 'task', filterField: 'status', filterOpts: ['pending', 'in_progress', 'done', 'cancelled'],
   cols: [{ k: 'title' }, { k: 'type' }, { k: 'priority', pill: true }, { k: 'status', pill: true }, { k: 'dueAt', label: 'Due', date: true }, { k: 'recurrence' }, { k: 'assignedTo.name', label: 'Assigned' }],
-  fields: [{ k: 'title', req: true }, { k: 'description', type: 'textarea' }, { k: 'type', type: 'select', opts: ['follow_up', 'call', 'meeting', 'email', 'other'] }, { k: 'priority', type: 'select', opts: ['low', 'medium', 'high', 'urgent'] }, { k: 'dueAt', type: 'datetime' }, { k: 'remindAt', type: 'datetime' }, { k: 'recurrence', type: 'select', opts: ['none', 'daily', 'weekly', 'monthly'] }, { k: 'assignedTo', type: 'ref', src: '/users', label: 'Assign to' }],
+  fields: [{ k: 'title', req: true }, { k: 'description', type: 'textarea' }, { k: 'type', type: 'select', opts: ['follow_up', 'call', 'meeting', 'email', 'other'] }, { k: 'priority', type: 'select', opts: ['low', 'medium', 'high', 'urgent'] }, { k: 'dueAt', type: 'datetime', label: 'Due date', req: true }, { k: 'remindAt', type: 'datetime', label: 'Reminder' }, { k: 'recurrence', type: 'select', opts: ['none', 'daily', 'weekly', 'monthly'] }, { k: 'assignedTo', type: 'ref', src: '/users', label: 'Assign to' }],
   actions: [{ label: 'Done', perm: ['tasks', 'u'], show: (r) => r.status !== 'done', run: async (r, reload) => { await api(`/tasks/${r._id}/complete`, { method: 'POST' }); toast('Completed'); reload(); } }],
 }) };
 
@@ -442,13 +499,13 @@ MODULES.communications = { title: 'Communications', render: listModule({
 }) };
 
 MODULES.templates = { title: 'Templates', render: listModule({
-  res: 'templates', path: '/templates', title: 'Template', filterField: 'channel', filterOpts: ['email', 'whatsapp', 'sms'],
+  res: 'templates', path: '/templates', title: 'Template', spec: 'template', filterField: 'channel', filterOpts: ['email', 'whatsapp', 'sms'],
   cols: [{ k: 'name' }, { k: 'channel' }, { k: 'subject' }, { k: 'body' }],
-  fields: [{ k: 'name', req: true }, { k: 'channel', type: 'select', opts: ['email', 'whatsapp', 'sms'], req: true }, { k: 'subject' }, { k: 'body', type: 'textarea', req: true }],
+  fields: [{ k: 'name', req: true }, { k: 'channel', type: 'select', opts: ['email', 'whatsapp', 'sms'], req: true }, { k: 'subject', label: 'Subject (email)' }, { k: 'body', type: 'textarea', label: 'Message', req: true }],
 }) };
 
 MODULES.campaigns = { title: 'Campaigns', render: listModule({
-  res: 'campaigns', path: '/campaigns', title: 'Campaign', filterField: 'status', filterOpts: ['draft', 'running', 'paused', 'completed'],
+  res: 'campaigns', path: '/campaigns', title: 'Campaign', spec: 'campaign', filterField: 'status', filterOpts: ['draft', 'running', 'paused', 'completed'],
   cols: [{ k: 'name' }, { k: 'channel' }, { k: 'audience.model', label: 'Audience' }, { k: 'status', pill: true }, { k: 'stats.enrolled', label: 'Enrolled' }, { k: 'stats.sent', label: 'Sent' }, { k: 'stats.failed', label: 'Failed' }],
   fields: [{ k: 'name', req: true }, { k: 'channel', type: 'select', opts: ['email', 'whatsapp', 'sms'], req: true }, { k: 'audience.model', type: 'select', opts: ['Lead', 'Customer'], req: true }, { k: 'audience.filter', type: 'json', label: 'Audience filter (JSON, e.g. {"source":"website"})' }, { k: 'steps', type: 'json', req: true, label: 'Steps (JSON: [{"delayDays":0,"subject":"Hi {{person.name}}","body":"…"}, …])' }, { k: 'cost', type: 'number' }],
   actions: [
@@ -558,8 +615,9 @@ function workflowEditor(meta) {
     const toggle = h('button', { class: 'btn sm sec', style: 'float:right', onclick: () => { jsonMode = !jsonMode; toggle.textContent = jsonMode ? 'Visual editor' : 'Edit as JSON'; draw(); } }, 'Edit as JSON');
     draw();
     modal(row ? 'Edit workflow' : 'New workflow', h('div', {}, toggle, body), [{ label: 'Save', run: async () => {
-      if (!String(st.name || '').trim()) throw new Error('Name is required');
-      const payload = { name: st.name.trim(), active: !!st.active, trigger: st.trigger, steps: st.steps };
+      const payload = checkSpec({ name: st.name || '', active: !!st.active, trigger: st.trigger, steps: st.steps }, 'workflow', jsonMode ? {} : { name: body.querySelector('input') });
+      const problems = Rules.workflowSteps(payload.steps, payload.trigger?.conditions);
+      if (problems.length) throw new Error(problems.join('\n'));
       await api('/workflows' + (row ? '/' + row._id : ''), { method: row ? 'PATCH' : 'POST', body: payload });
       toast('Saved'); reload();
     } }], true);
@@ -632,7 +690,7 @@ MODULES.users = { title: 'Team & Users', render: listModule({
 }) };
 
 MODULES.pipelines = { title: 'Pipelines', render: listModule({
-  res: 'pipelines', path: '/pipelines', title: 'Pipeline', search: false,
+  res: 'pipelines', path: '/pipelines', title: 'Pipeline', spec: 'pipeline', search: false,
   cols: [{ k: 'name' }, { k: 'stages' }, { k: 'isDefault', label: 'Default', pill: true }],
   fields: [{ k: 'name', req: true }, { k: 'stages', type: 'tags', req: true, label: 'Stages (comma separated, in order)' }, { k: 'isDefault', type: 'checkbox' }],
 }) };
@@ -851,7 +909,7 @@ MODULES.adaccounts = { title: 'Ad Accounts', render: async (root) => {
       a.budgetUsedPct != null && h('div', { class: 'hbar', style: 'margin-bottom:0' }, h('div', { class: 'tr' }, h('i', { style: `width:${Math.min(100, a.budgetUsedPct)}%;background:${a.budgetUsedPct > 90 ? 'var(--bad)' : ''}` })), h('span', { style: 'width:46px' }, a.budgetUsedPct + '%')))));
   });
   await listModule({
-    res: 'ads', path: '/ads/accounts', title: 'Ad account', filterField: 'platform', filterOpts: PLATFORMS,
+    res: 'ads', path: '/ads/accounts', title: 'Ad account', spec: 'adAccount', filterField: 'platform', filterOpts: PLATFORMS,
     note: 'Click "Connect with Facebook" or "Connect with Google": sign in once and every ad account you manage is added and synced automatically (campaigns and spend every 3 hours, lead forms every 10 minutes). Pause / Resume / budget changes in the CRM are applied on the ad network.',
     barExtra: [
       { label: 'Connect with Facebook', show: () => can('ads', 'u'), run: (reload) => adSignIn('meta', null, () => { reload(); loadSum(); }) },
@@ -920,7 +978,7 @@ async function connectModal(acc, done) {
 }
 
 MODULES.adcampaigns = { title: 'Ad Campaigns', render: listModule({
-  res: 'ads', path: '/ads/campaigns', title: 'Campaign', filterField: 'status', filterOpts: ['draft', 'pending_approval', 'active', 'paused', 'ended'],
+  res: 'ads', path: '/ads/campaigns', title: 'Campaign', spec: 'adCampaign', filterField: 'status', filterOpts: ['draft', 'pending_approval', 'active', 'paused', 'ended'],
   note: 'Daily budgets above the approval limit (default ₹5,000) are sent to a manager when launched. Campaigns auto-pause when the total budget is used. Campaigns imported from Google Ads / Meta are paused, resumed and re-budgeted on the ad network too.',
   cols: [{ k: 'name' }, { k: 'account.platform', label: 'Platform', pill: true }, { k: 'objective' }, { k: 'status', pill: true }, { k: 'dailyBudget', label: 'Daily budget', money: true }, { k: 'totalBudget', label: 'Total budget', money: true }, { k: 'endDate', label: 'Ends', date: true }],
   fields: [{ k: 'name', req: true }, { k: 'account', type: 'ref', src: '/ads/accounts', label: 'Ad account', req: true, createOnly: true }, { k: 'objective', type: 'select', opts: ['leads', 'sales', 'traffic', 'awareness', 'engagement'] },
@@ -952,7 +1010,7 @@ MODULES.adcampaigns = { title: 'Ad Campaigns', render: listModule({
 }) };
 
 MODULES.adcreatives = { title: 'Creatives & A/B Tests', render: listModule({
-  res: 'ads', path: '/ads/creatives', title: 'Creative', filterField: 'status', filterOpts: ['active', 'paused', 'rejected'],
+  res: 'ads', path: '/ads/creatives', title: 'Creative', spec: 'adCreative', filterField: 'status', filterOpts: ['active', 'paused', 'rejected'],
   cols: [{ k: 'name' }, { k: 'variant', pill: true }, { k: 'campaign.name', label: 'Campaign' }, { k: 'type' }, { k: 'headline' }, { k: 'status', pill: true }],
   fields: [{ k: 'campaign', type: 'ref', src: '/ads/campaigns', label: 'Campaign', req: true, createOnly: true }, { k: 'name', req: true }, { k: 'variant', label: 'Variant (A, B, C…)' }, { k: 'type', type: 'select', opts: ['image', 'video', 'carousel', 'text'] },
     { k: 'headline' }, { k: 'body', type: 'textarea', label: 'Ad copy' }, { k: 'cta', label: 'Call to action' }, { k: 'mediaUrl', label: 'Image/video URL' }, { k: 'landingUrl' }, { k: 'status', type: 'select', opts: ['active', 'paused', 'rejected'], editOnly: true }],
@@ -1148,7 +1206,7 @@ MODULES.hrdash = { title: 'HR Dashboard', render: async (root) => {
 
 // ---------- Employees ----------
 MODULES.hremp = { title: 'Employees', render: listModule({
-  res: 'hr', path: '/hr/employees', title: 'Employee', filterField: 'status', filterOpts: ['active', 'inactive', 'terminated'],
+  res: 'hr', path: '/hr/employees', title: 'Employee', spec: 'employee', filterField: 'status', filterOpts: ['active', 'inactive', 'terminated'],
   cols: [{ k: 'name', who: true }, { k: 'employeeCode', label: 'Code' }, { k: 'department' }, { k: 'designation' }, { k: 'joinDate', label: 'Joined', date: true }, { k: 'salary.basic', label: 'Basic', money: true }, { k: 'status', pill: true }],
   fields: [{ k: 'name', req: true }, { k: 'email', label: 'Email (links their login to My Space)' }, { k: 'phone' }, { k: 'department' }, { k: 'designation' }, { k: 'branch' },
     { k: 'joinDate', type: 'date', req: true, label: 'Joining date' }, { k: 'birthday', type: 'date' }, { k: 'status', type: 'select', opts: ['active', 'inactive', 'terminated'], editOnly: true }, { k: 'exitDate', type: 'date', editOnly: true },
@@ -1227,7 +1285,7 @@ MODULES.hrleave = { title: 'Leave Requests', render: listModule({
 }) };
 
 MODULES.hrholidays = { title: 'Holidays', render: listModule({
-  res: 'hr', path: '/hr/holidays', title: 'Holiday', search: false,
+  res: 'hr', path: '/hr/holidays', title: 'Holiday', spec: 'holiday', search: false,
   cols: [{ k: 'date', date: true, label: 'Date' }, { k: 'name' }],
   fields: [{ k: 'name', req: true }, { k: 'date', type: 'date', req: true }],
 }) };

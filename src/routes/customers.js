@@ -3,11 +3,13 @@ const { crud } = require('../utils/crud');
 const { authorize } = require('../middleware/auth');
 const { logActivity } = require('../services/events');
 const ai = require('../services/ai');
+const { assertValid } = require('../utils/helpers');
 const { timeline, ownerDefault, need } = require('./shared');
 
 const c = crud({
   Model: Customer,
   resource: 'customers',
+  spec: 'customer',
   search: ['name', 'email', 'phone', 'organization'],
   filters: ['lifecycle', 'assignedTo', 'tags'],
   populate: { path: 'assignedTo', select: 'name email' },
@@ -26,6 +28,7 @@ const c = crud({
 
 c.router.post('/:id/purchases', authorize('customers', 'u'), async (req, res) => {
   const cust = await c.find(req);
+  assertValid(req.body || {}, 'purchase');
   cust.purchases.push({ item: need(req.body.item, 'item is required'), amount: +req.body.amount || 0 });
   cust.lastActivityAt = new Date();
   await cust.save();

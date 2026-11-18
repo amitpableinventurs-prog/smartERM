@@ -193,13 +193,16 @@ function broadcastEditor(ch, flows, templates, row, reload) {
   const cost = el.input(r.costPerUnit ?? '', { type: 'number', min: 0, step: '0.01', placeholder: '0.20' });
   parts.push(h('div', { class: 'cols3' }, fld('Schedule (optional)', when, 'Empty = send on launch'), fld(ch === 'ivr' ? 'Calls per minute' : 'Messages per minute', rate), fld('Cost per ' + (ch === 'ivr' ? 'call' : 'message'), cost, 'For ROI in the report')));
   modal(row ? 'Edit broadcast' : `New ${HUB_LABEL[ch]} broadcast`, h('div', {}, parts), [{ label: row ? 'Save' : 'Save & add recipients', run: async () => {
-    if (!name.value.trim()) throw new Error('Name is required');
-    const payload = { name: name.value.trim(), channel: ch, scheduledAt: when.value ? new Date(when.value).toISOString() : null, ratePerMinute: +rate.value || 60, costPerUnit: +cost.value || 0 };
+    // Letters typed into a number box read as '' in the browser; send NaN so the check reports it instead of using the default.
+    const numVal = (x, def) => (x.validity?.badInput ? NaN : x.value === '' ? def : Number(x.value));
+    const at = when.value ? new Date(when.value) : null;
+    const payload = { name: name.value.trim(), channel: ch, scheduledAt: at ? (Number.isNaN(at.getTime()) ? 'invalid' : at.toISOString()) : null, ratePerMinute: numVal(rate, ch === 'ivr' ? 20 : 60), costPerUnit: numVal(cost, 0) };
     if (ch === 'ivr') payload.ivrFlow = flow.value || undefined;
     else {
       Object.assign(payload, { body: body.value, template: tpl.value || null });
-      if (ch === 'whatsapp') Object.assign(payload, { mediaUrl: media.value || undefined, waTemplate: waName.value ? { name: waName.value.trim(), language: waLang.value.trim() || 'en', params: waParams.value ? waParams.value.split('|').map((x) => x.trim()) : [] } : { name: '' } });
+      if (ch === 'whatsapp') Object.assign(payload, { mediaUrl: media.value.trim() || undefined, waTemplate: waName.value ? { name: waName.value.trim(), language: waLang.value.trim() || 'en', params: waParams.value ? waParams.value.split('|').map((x) => x.trim()) : [] } : { name: '' } });
     }
+    checkSpec(payload, 'broadcast', { name, body, mediaUrl: media, ratePerMinute: rate, costPerUnit: cost, scheduledAt: when, ivrFlow: flow, 'waTemplate.name': waName, 'waTemplate.language': waLang }, row ? { partial: true, current: row } : {});
     const saved = await api('/hub/broadcasts' + (row ? '/' + row._id : ''), { method: row ? 'PATCH' : 'POST', body: payload });
     toast('Saved'); reload();
     if (!row) recipientsModal(saved, reload);
@@ -473,6 +476,11 @@ async function flowEditor(row, reload) {
       st.nodes.push({ id: `${t}${k}`, type: t, ...(t === 'menu' ? { options: [{ digit: '1', label: '' }] } : {}) }); draw();
     } }, '+ Add step')),
     jsonBox), [{ label: 'Save flow', run: async () => {
+    checkSpec(st, 'ivrFlow', { name, description: desc, voice });
+    for (const n of st.nodes) {
+      if (n.type === 'say' && !String(n.text || '').trim()) throw new Error(`Step "${n.id}": enter what the IVR says`);
+      if (n.type === 'transfer' && !Rules.isPhone(String(n.number || ''))) throw new Error(`Step "${n.id}": enter a valid phone number to transfer to (7-15 digits, no letters)`);
+    }
     const saved = await api('/hub/ivr/flows' + (row ? '/' + row._id : ''), { method: row ? 'PATCH' : 'POST', body: st });
     toast('Flow saved'); reload && reload();
     return saved;
@@ -490,6 +498,7 @@ function simulator(flow) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   const start = guard(async () => {
+    checkSpec({ phone: phone.value }, 'ivrCall', { phone });
     const r = await api('/hub/ivr/simulate', { method: 'POST', body: { flowId: flow._id, phone: phone.value, direction: dir.value } });
     callId = r.call._id; seen = 0; draw(r);
   });
@@ -543,7 +552,7 @@ MODULES.ivrflows = { title: 'IVR Flows', render: listModule({
   actions: [
     { label: 'Edit', perm: ['ivr', 'u'], run: (r, reload) => flowEditor(r, reload) },
     { label: 'Test call', perm: ['ivr', 'c'], run: (r) => simulator(r) },
-    { label: 'Call a number', perm: ['ivr', 'c'], run: (r) => { const p = el.input('', { placeholder: '+91…' }); modal('Place a real IVR call', h('div', {}, fld('Number', p, 'Uses the voice provider (simulated if none is connected). Respects the DND list.')), [{ label: 'Call', run: async () => { const c = await api('/hub/ivr/call', { method: 'POST', body: { flowId: r._id, phone: p.value } }); toast(`Call ${c.status}`); } }]); } },
+    { label: 'Call a number', perm: ['ivr', 'c'], run: (r) => { const p = el.input('', { placeholder: '+91…' }); modal('Place a real IVR call', h('div', {}, fld('Number', p, 'Uses the voice provider (simulated if none is connected). Respects the DND list.')), [{ label: 'Call', run: async () => { checkSpec({ phone: p.value }, 'ivrCall', { phone: p }); const c = await api('/hub/ivr/call', { method: 'POST', body: { flowId: r._id, phone: p.value } }); toast(`Call ${c.status}`); } }]); } },
   ],
 }) };
 
@@ -798,7 +807,7 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
 
 // ================= DND =================
 MODULES.dnd = { title: 'DND / Opt-outs', render: listModule({
-  res: 'hubsetup', path: '/hub/optouts', title: 'Number', filterField: 'channel', filterOpts: ['all', 'sms', 'whatsapp', 'voice'], noEdit: true,
+  res: 'hubsetup', path: '/hub/optouts', title: 'Number', spec: 'optout', filterField: 'channel', filterOpts: ['all', 'sms', 'whatsapp', 'voice'], noEdit: true,
   note: 'Numbers here are skipped by every broadcast, workflow and reply. People are added automatically when they reply STOP, press the opt-out key in an IVR menu, or the AI detects an opt-out.',
   cols: [{ k: 'createdAt', label: 'Added', date: true }, { k: 'phone' }, { k: 'channel', pill: true }, { k: 'source', pill: true }, { k: 'reason' }],
   fields: [{ k: 'phone', req: true }, { k: 'channel', type: 'select', opts: ['all', 'sms', 'whatsapp', 'voice'], req: true }, { k: 'reason' }],

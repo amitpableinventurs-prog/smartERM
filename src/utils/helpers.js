@@ -1,9 +1,18 @@
+const Rules = require('../../public/rules');
+
 class HttpError extends Error {
   constructor(status, message, details) {
     super(message);
     this.status = status;
     this.details = details;
   }
+}
+
+// Same rules the panels check before saving (public/rules.js). 400 with every problem; details.fields lets the form mark each input.
+function assertValid(data, spec, opts) {
+  const errs = Rules.validate(data, spec, opts);
+  if (errs.length) throw new HttpError(400, errs.map((e) => e.message).join('; '), { fields: errs });
+  return data;
 }
 
 // "Hi {{lead.name}}" -> looks up nested keys in ctx. Missing keys render as ''.
@@ -54,4 +63,4 @@ function toCsv(docs, fields) {
 const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => obj[k] !== undefined).map((k) => [k, obj[k]]));
 const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
 
-module.exports = { HttpError, render, parseCsv, toCsv, pick, addDays };
+module.exports = { HttpError, assertValid, render, parseCsv, toCsv, pick, addDays };

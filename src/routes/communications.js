@@ -85,5 +85,5 @@ c.router.post('/:id/analyze', authorize('communications', 'r'), async (req, res)
 module.exports = c.finish();
 
 // ---- Templates ----
-const t = crud({ Model: M.Template, resource: 'templates', search: ['name'], filters: ['channel'], scope: false });
+const t = crud({ Model: M.Template, resource: 'templates', spec: 'template', search: ['name'], filters: ['channel'], scope: false });
 module.exports.templates = t.finish();

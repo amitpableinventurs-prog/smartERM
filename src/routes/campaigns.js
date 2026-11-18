@@ -7,6 +7,7 @@ const campaigns = require('../services/campaigns');
 const c = crud({
   Model: Campaign,
   resource: 'campaigns',
+  spec: 'campaign',
   search: ['name'],
   filters: ['status', 'channel'],
   scope: false,

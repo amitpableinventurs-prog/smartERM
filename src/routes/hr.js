@@ -23,7 +23,7 @@ const monthQuery = (req) => {
 
 // ---------------- Employees ----------------
 const employees = crud({
-  Model: M.Employee, resource: 'hr', search: ['name', 'email', 'employeeCode', 'department', 'designation'], filters: ['department', 'status', 'branch'], scope: false,
+  Model: M.Employee, resource: 'hr', spec: 'employee', search: ['name', 'email', 'employeeCode', 'department', 'designation'], filters: ['department', 'status', 'branch'], scope: false,
   populate: { path: 'user', select: 'email role' }, defaultSort: 'employeeCode',
   hooks: {
     async beforeCreate(req, data) {
@@ -219,7 +219,7 @@ router.use('/leaves', leaves);
 
 // ---------------- Holidays ----------------
 const holidays = crud({
-  Model: M.Holiday, resource: 'hr', search: ['name'], scope: false, defaultSort: 'date',
+  Model: M.Holiday, resource: 'hr', spec: 'holiday', search: ['name'], scope: false, defaultSort: 'date',
   hooks: {
     beforeCreate(req, d) { d.date = new Date(hr.dayOnly(d.date)); },
     beforeUpdate(req, doc, d) { if (d.date) d.date = new Date(hr.dayOnly(d.date)); },

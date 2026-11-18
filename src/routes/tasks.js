@@ -10,6 +10,7 @@ const NEXT = { daily: (d) => addDays(d, 1), weekly: (d) => addDays(d, 7), monthl
 const c = crud({
   Model: Task,
   resource: 'tasks',
+  spec: 'task',
   search: ['title', 'description'],
   filters: ['status', 'priority', 'type', 'assignedTo', 'relatedTo.id'],
   populate: { path: 'assignedTo', select: 'name' },

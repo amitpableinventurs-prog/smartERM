@@ -91,7 +91,7 @@ company.post('/rotate-api-key', authorize('company', 'u'), async (req, res) => {
 
 // ---- Pipelines, outbound webhook subscriptions ----
 const pipelines = crud({
-  Model: M.Pipeline, resource: 'pipelines', scope: false,
+  Model: M.Pipeline, resource: 'pipelines', scope: false, spec: 'pipeline',
   hooks: {
     async beforeCreate(req, d) { if (d.isDefault) await M.Pipeline.updateMany({ company: req.companyId }, { isDefault: false }); },
     async beforeUpdate(req, doc, d) { if (d.isDefault) await M.Pipeline.updateMany({ company: req.companyId }, { isDefault: false }); },

@@ -1,7 +1,7 @@
 const express = require('express');
 const { authorize, scopeFilter } = require('../middleware/auth');
 const { audit } = require('../middleware/common');
-const { HttpError } = require('./helpers');
+const { HttpError, assertValid } = require('./helpers');
 
 const PROTECTED = ['_id', 'company', 'createdAt', 'updatedAt', '__v'];
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -11,9 +11,10 @@ const clean = (body = {}) => Object.fromEntries(Object.entries(body).filter(([k]
 /**
  * Generic company-scoped REST resource.
  * hooks: beforeCreate(req, data), afterCreate(req, doc), beforeUpdate(req, doc, data), afterUpdate(req, doc, before)
+ * spec: a validation spec name from public/rules.js, checked on create and (for the fields sent) on update.
  * Returns { router, base } so callers can add extra routes before the /:id routes.
  */
-function crud({ Model, resource, search = [], filters = [], populate = '', hooks = {}, scope = true, defaultSort = '-createdAt' }) {
+function crud({ Model, resource, search = [], filters = [], populate = '', hooks = {}, scope = true, defaultSort = '-createdAt', spec }) {
   const router = express.Router();
   const base = (req) => ({ company: req.companyId, ...(scope ? scopeFilter(req, resource) : {}) });
   router.use(audit(resource));
@@ -45,6 +46,7 @@ function crud({ Model, resource, search = [], filters = [], populate = '', hooks
 
   router.post('/', authorize(resource, 'c'), async (req, res) => {
     let data = clean(req.body);
+    if (spec) assertValid(data, spec);
     if (hooks.beforeCreate) data = (await hooks.beforeCreate(req, data)) || data;
     const doc = await Model.create({ ...data, company: req.companyId });
     if (hooks.afterCreate) await hooks.afterCreate(req, doc);
@@ -62,6 +64,7 @@ function crud({ Model, resource, search = [], filters = [], populate = '', hooks
         const doc = await find(req);
         const before = doc.toObject();
         let data = clean(req.body);
+        if (spec) assertValid(data, spec, { partial: true, current: before });
         if (hooks.beforeUpdate) data = (await hooks.beforeUpdate(req, doc, data)) || data;
         doc.set(data);
         await doc.save();

@@ -6,7 +6,7 @@ const config = require('../config');
 const { crud, escapeRe } = require('../utils/crud');
 const { authorize, scopeFilter } = require('../middleware/auth');
 const { validate, audit } = require('../middleware/common');
-const { HttpError } = require('../utils/helpers');
+const { HttpError, assertValid } = require('../utils/helpers');
 const { normalize } = require('../utils/phone');
 const providers = require('../services/providers');
 const bot = require('../services/bot');
@@ -234,7 +234,7 @@ router.post('/bot/test', authorize('hubsetup', 'r'), validate(z.object({
 
 // ================= Bulk broadcasts =================
 const bc = crud({
-  Model: M.Broadcast, resource: 'bulk', search: ['name'], filters: ['channel', 'status'], scope: false, populate: 'ivrFlow template',
+  Model: M.Broadcast, resource: 'bulk', spec: 'broadcast', search: ['name'], filters: ['channel', 'status'], scope: false, populate: 'ivrFlow template',
   hooks: {
     beforeCreate(req, d) {
       for (const k of ['status', 'stats', 'launchedAt', 'completedAt']) delete d[k];
@@ -442,7 +442,7 @@ const flowSchema = z.object({
   start: z.string().min(1).max(40), voice: z.string().max(40).optional(), language: z.string().max(10).optional(), nodes: z.array(z.any()).min(1).max(100),
 });
 const flows = crud({
-  Model: M.IvrFlow, resource: 'ivr', search: ['name'], filters: ['active'], scope: false,
+  Model: M.IvrFlow, resource: 'ivr', spec: 'ivrFlow', search: ['name'], filters: ['active'], scope: false,
   hooks: {
     async beforeCreate(req, d) {
       const v = flowSchema.parse(d);
@@ -496,10 +496,12 @@ async function loadFlow(req, id) {
 router.post('/ivr/call', authorize('ivr', 'c'), validate(z.object({ flowId: oid, phone: z.string().optional(), kind: z.enum(['Lead', 'Customer']).optional(), id: oid.optional() })), async (req, res) => {
   const flow = await loadFlow(req, req.body.flowId);
   let phone = req.body.phone, contact;
+  if (!(req.body.kind && req.body.id)) assertValid({ phone }, 'ivrCall');
   if (req.body.kind && req.body.id) {
     const doc = await M[req.body.kind].findOne({ _id: req.body.id, company: req.companyId });
     if (!doc) throw new HttpError(404, 'Record not found');
     phone = doc.phone; contact = { kind: req.body.kind, id: doc._id };
+    if (!normalize(phone)) throw new HttpError(400, `This ${req.body.kind.toLowerCase()} has no valid phone number`);
   }
   contact ||= await ivr.mapContact(req.companyId, normalize(phone));
   try { res.status(201).json(await ivr.dial(req.companyId, flow, phone, { contact })); }
@@ -513,6 +515,7 @@ const simView = (call, verbs) => ({
 });
 
 router.post('/ivr/simulate', authorize('ivr', 'c'), validate(z.object({ flowId: oid, phone: z.string().min(6).max(30), direction: z.enum(['inbound', 'outbound']).default('inbound') })), async (req, res) => {
+  assertValid({ phone: req.body.phone }, 'ivrCall');
   const flow = await loadFlow(req, req.body.flowId);
   const phone = normalize(req.body.phone);
   if (!phone) throw new HttpError(400, 'Invalid phone number');
@@ -546,7 +549,7 @@ router.post('/ivr/simulate/:id/hangup', authorize('ivr', 'c'), async (req, res) 
 
 // ================= DND / opt-outs =================
 const dnd = crud({
-  Model: M.OptOut, resource: 'hubsetup', search: ['phone', 'reason'], filters: ['channel', 'source'], scope: false,
+  Model: M.OptOut, resource: 'hubsetup', spec: 'optout', search: ['phone', 'reason'], filters: ['channel', 'source'], scope: false,
   hooks: {
     beforeCreate(req, d) {
       d.phone = normalize(d.phone);

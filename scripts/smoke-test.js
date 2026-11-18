@@ -185,13 +185,38 @@ async function waitFor(fn, ms = 8000) {
   });
 
   await test('csv import skips duplicates; export neutralises formulas', async () => {
-    const csv = 'name,email,phone,source\nIvan Import,ivan@x.test,,import\nLola Dup,lola@x.test,,import\n=EVIL(),evil@x.test,,import\n';
+    // Formula probe goes in a free-text column: "=EVIL()" is no longer accepted as a person's name.
+    const csv = 'name,email,phone,source,organization\nIvan Import,ivan@x.test,,import,\nLola Dup,lola@x.test,,import,\nEve Evil,evil@x.test,,import,=EVIL()\n';
     const r = await call('POST', '/api/data/import/leads', csv, admin, true);
     assert.equal(r.status, 201, JSON.stringify(r.body));
     assert.equal(r.body.imported, 2);
     assert.equal(r.body.skipped, 1);
     const exp = await call('GET', '/api/data/export/leads', null, admin);
     assert(exp.body.includes("'=EVIL()"));
+  });
+
+  await test('validation: bad names, emails, phones, numbers and missing due dates are refused with readable messages', async () => {
+    const bad = await call('POST', '/api/leads', { name: '12345', email: 'wrong.com', phone: 'abc12' }, admin);
+    assert.equal(bad.status, 400);
+    assert(/Name cannot contain numbers/.test(bad.body.error) && /valid email/.test(bad.body.error) && /valid phone/.test(bad.body.error), bad.body.error);
+    assert.deepEqual(bad.body.details.fields.map((f) => f.path), ['name', 'email', 'phone']);
+    assert.equal((await call('POST', '/api/leads', { name: 'Neha Negative', budget: -50 }, admin)).status, 400);
+    const nan = await call('POST', '/api/leads', { name: 'Nina Nan', score: 'abc' }, admin);
+    assert.equal(nan.status, 400);
+    assert(!/Cast to/.test(nan.body.error), nan.body.error);
+    assert.equal((await call('POST', '/api/customers', { name: '98765432', email: 'galatemail.com' }, admin)).status, 400);
+    const t = await call('POST', '/api/tasks', { title: 'asxsacxsca' }, admin);
+    assert.equal(t.status, 400);
+    assert(/Due date is required/.test(t.body.error), t.body.error);
+    assert.equal((await call('POST', '/api/templates', { name: '123', channel: 'sms', body: '456' }, admin)).status, 400);
+    assert.equal((await call('POST', '/api/pipelines', { name: 'Flow', stages: ['New', 'new'] }, admin)).status, 400);
+    assert.equal((await call('POST', '/api/hub/broadcasts', { name: 'Empty', channel: 'whatsapp' }, admin)).status, 400);
+    assert.equal((await call('POST', '/api/hr/employees', { name: 'Ravi Kumar', joinDate: '2026-01-01', bank: { ifsc: 'X1' } }, admin)).status, 400);
+    // Editing one field does not re-check the others; changing a field to a bad value is refused.
+    const ok = (await call('POST', '/api/leads?force=true', { name: 'Vera Valid', email: 'vera@x.test' }, admin)).body;
+    assert.equal((await call('PATCH', `/api/leads/${ok._id}`, { status: 'contacted' }, admin)).status, 200);
+    assert.equal((await call('PATCH', `/api/leads/${ok._id}`, { email: 'nope' }, admin)).status, 400);
+    await call('DELETE', `/api/leads/${ok._id}`, null, admin);
   });
 
   await test('web form webhook creates a lead once', async () => {
@@ -232,7 +257,7 @@ async function waitFor(fn, ms = 8000) {
     assert.equal(c.status, 201, JSON.stringify(c.body));
     const l = await call('POST', `/api/campaigns/${c.body._id}/launch`, {}, admin);
     assert.equal(l.status, 200, JSON.stringify(l.body));
-    assert.equal(l.body.stats.enrolled, 2); // Ivan + =EVIL()
+    assert.equal(l.body.stats.enrolled, 2); // Ivan + Eve
     const a = (await call('GET', `/api/campaigns/${c.body._id}/analytics`, null, admin)).body;
     assert.equal(a.sent + a.failed, 2);
   });
@@ -677,10 +702,12 @@ async function waitFor(fn, ms = 8000) {
     assert(run.log.some((l) => l.step === 'ai_score' && l.ok) && run.log.some((l) => l.step === 'ai_message' && l.ok && /whatsapp simulated.*heuristic/.test(l.detail)), JSON.stringify(run.log));
     const tl = (await call('GET', `/api/leads/${lead._id}/timeline`, null, admin)).body;
     assert(tl.some((t) => t.type === 'whatsapp.outbound' && t.message.includes('Ad Anil')), JSON.stringify(tl.slice(0, 4)));
-    const bad = (await call('POST', '/api/workflows', { name: 'no purpose', trigger: { event: 'lead.created' }, steps: [{ type: 'ai_message' }] }, admin)).body;
-    assert.equal((await call('POST', `/api/workflows/${bad._id}/test`, { kind: 'Lead', id: lead._id }, admin)).body[0].status, 'failed');
+    // A step missing what it needs is refused when saving, not left to fail mid-run.
+    const bad = await call('POST', '/api/workflows', { name: 'no purpose', trigger: { event: 'lead.created' }, steps: [{ type: 'ai_message' }] }, admin);
+    assert.equal(bad.status, 400);
+    assert(/describe what the message should do/.test(bad.body.error), bad.body.error);
 
-    for (const wf of [review, follow, bad]) await call('DELETE', `/api/workflows/${wf._id}`, null, admin);
+    for (const wf of [review, follow]) await call('DELETE', `/api/workflows/${wf._id}`, null, admin);
   });
 
   await test('hr: employees, punching, attendance, leave, payroll, self-service, RBAC', async () => {
@@ -701,7 +728,7 @@ async function waitFor(fn, ms = 8000) {
     const salary = { basic: 30000, hra: 12000, allowances: 8000 }; // gross 50,000
 
     const A = (await call('POST', '/api/hr/employees', { name: 'Sam Sales', email: 'sam@acme.test', department: 'Sales', joinDate: joined, salary }, hrTok)).body;
-    const B = (await call('POST', '/api/hr/employees', { name: 'Bela Backoffice', department: 'Ops', joinDate: joined, salary, bank: { account: '1234567890', ifsc: 'HDFC0001' } }, hrTok)).body;
+    const B = (await call('POST', '/api/hr/employees', { name: 'Bela Backoffice', department: 'Ops', joinDate: joined, salary, bank: { account: '1234567890', ifsc: 'HDFC0000001' } }, hrTok)).body;
     assert(A.employeeCode && B.employeeCode && A.employeeCode !== B.employeeCode);
     assert(A.user, 'employee is linked to the login with the same email');
     assert.equal((await call('GET', '/api/hr/employees', null, salesTok)).status, 403);

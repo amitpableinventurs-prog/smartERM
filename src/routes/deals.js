@@ -10,6 +10,7 @@ const ref = (d) => ({ kind: 'Deal', id: d._id });
 const c = crud({
   Model: Deal,
   resource: 'deals',
+  spec: 'deal',
   search: ['title'],
   filters: ['status', 'stage', 'pipeline', 'assignedTo'],
   populate: [{ path: 'assignedTo', select: 'name' }, { path: 'lead', select: 'name' }, { path: 'customer', select: 'name' }],

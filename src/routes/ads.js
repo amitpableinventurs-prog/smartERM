@@ -30,7 +30,7 @@ const API_FIELDS = ['credentials', 'connected', 'lastSyncAt', 'lastSyncError', '
 
 // ---------------- Accounts ----------------
 const accounts = crud({
-  Model: M.AdAccount, resource: 'ads', search: ['name', 'accountId'], filters: ['platform', 'status'], scope: false,
+  Model: M.AdAccount, resource: 'ads', spec: 'adAccount', search: ['name', 'accountId'], filters: ['platform', 'status'], scope: false,
   hooks: {
     beforeCreate(req, data) { for (const k of API_FIELDS) delete data[k]; },
     beforeUpdate(req, acc, data) { for (const k of API_FIELDS) delete data[k]; },
@@ -89,7 +89,7 @@ router.use('/accounts', accounts.finish());
 
 // ---------------- Campaigns ----------------
 const campaigns = crud({
-  Model: M.AdCampaign, resource: 'ads', search: ['name'], filters: ['status', 'account', 'objective'], scope: false,
+  Model: M.AdCampaign, resource: 'ads', spec: 'adCampaign', search: ['name'], filters: ['status', 'account', 'objective'], scope: false,
   populate: [{ path: 'account', select: 'name platform currency' }, { path: 'owner', select: 'name' }],
   hooks: {
     async beforeCreate(req, data) {
@@ -216,7 +216,7 @@ router.use('/campaigns', campaigns.finish());
 
 // ---------------- Creatives (A/B) ----------------
 const creatives = crud({
-  Model: M.AdCreative, resource: 'ads', search: ['name', 'headline'], filters: ['campaign', 'status', 'type'], scope: false,
+  Model: M.AdCreative, resource: 'ads', spec: 'adCreative', search: ['name', 'headline'], filters: ['campaign', 'status', 'type'], scope: false,
   populate: { path: 'campaign', select: 'name' },
   hooks: {
     async beforeCreate(req, data) { if (!(await M.AdCampaign.exists({ _id: data.campaign, company: req.companyId }))) throw new HttpError(400, 'Valid campaign is required'); },

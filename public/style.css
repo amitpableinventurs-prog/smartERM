@@ -145,6 +145,10 @@ label{display:block;font-size:12.5px;font-weight:550;color:var(--mute);margin:14
 @keyframes pop{from{opacity:0;transform:translateY(10px) scale(.98)}}
 .toast{position:fixed;right:20px;bottom:20px;background:#1b2236;color:#fff;padding:12px 18px;border-radius:12px;z-index:90;max-width:380px;box-shadow:0 14px 34px rgba(0,0,0,.3);border-left:4px solid var(--ok);animation:pop .2s}
 .toast.err{border-left-color:var(--bad)}
+.toast{white-space:pre-line}
+/* ---------- field validation (public/rules.js) ---------- */
+input.invalid,select.invalid,textarea.invalid{border-color:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 15%,transparent)}
+.ferr{color:var(--bad);font-size:12px;margin-top:4px;line-height:1.35}
 .muted{color:var(--mute)}
 pre{background:var(--soft);padding:12px;border-radius:10px;overflow:auto;font-size:12px;margin:0}
 .tl{position:relative;padding-left:22px}

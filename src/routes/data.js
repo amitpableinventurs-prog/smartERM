@@ -4,6 +4,7 @@ const { authorize, scopeFilter } = require('../middleware/auth');
 const { HttpError, parseCsv, toCsv } = require('../utils/helpers');
 const { emit } = require('../services/events');
 const ai = require('../services/ai');
+const Rules = require('../../public/rules');
 
 const router = express.Router();
 router.use(express.text({ type: ['text/csv', 'text/plain'], limit: '5mb' }));
@@ -29,6 +30,8 @@ router.post('/import/leads', authorize('import', 'c'), authorize('leads', 'c'), 
     const email = r.email?.toLowerCase();
     const keys = [email && `e:${email}`, r.phone && `p:${r.phone}`].filter(Boolean);
     if (!r.name) { errors.push({ row: i + 2, error: 'name is required' }); continue; }
+    const bad = Rules.validate({ name: r.name, email: r.email || undefined, phone: r.phone || undefined, budget: r.budget ? Number(r.budget) : undefined }, 'lead');
+    if (bad.length) { errors.push({ row: i + 2, error: bad.map((e) => e.message).join('; ') }); continue; }
     if (keys.some((k) => seen.has(k))) { skipped.push({ row: i + 2, reason: 'duplicate' }); continue; }
     const budget = r.budget ? +r.budget : undefined;
     const data = {

@@ -21,6 +21,7 @@ const providers = require('./providers');
 const config = require('../config');
 const { logActivity, emit } = require('./events');
 const { HttpError } = require('../utils/helpers');
+const Rules = require('../../public/rules');
 const { normalize } = require('../utils/phone');
 
 const NODE_TYPES = ['say', 'menu', 'ai', 'transfer', 'voicemail', 'hangup'];
@@ -39,6 +40,8 @@ function validateFlow({ start, nodes }) {
     if (!NODE_TYPES.includes(n.type)) throw new HttpError(400, `Node "${n.id}": type must be one of ${NODE_TYPES.join(', ')}`);
     if (n.intent && !bot.INTENTS[n.intent]) throw new HttpError(400, `Node "${n.id}": unknown intent ${n.intent}`);
     const out = { id: n.id, type: n.type, label: str(n.label, 80), text: str(n.text), next: str(n.next, 40), intent: str(n.intent, 40) };
+    if (out.text != null && !/\p{L}/u.test(out.text)) throw new HttpError(400, `Step "${n.id}": the spoken text must contain words`);
+    if (n.type === 'say' && !out.text?.trim()) throw new HttpError(400, `Step "${n.id}": enter what the IVR says`);
     if (Array.isArray(n.actions) && n.actions.length) {
       out.actions = n.actions.filter((a) => a && bot.ACTION_TYPES.includes(a.type)).slice(0, 10);
     }
@@ -51,6 +54,7 @@ function validateFlow({ start, nodes }) {
         if (!/^[0-9*#]$/.test(d)) throw new HttpError(400, `Menu "${n.id}": digit must be 0-9, * or #`);
         if (digits.has(d)) throw new HttpError(400, `Menu "${n.id}": digit ${d} used twice`);
         if (o.intent && !bot.INTENTS[o.intent]) throw new HttpError(400, `Menu "${n.id}": unknown intent ${o.intent}`);
+        if (o.label != null && o.label !== '' && !/\p{L}/u.test(String(o.label))) throw new HttpError(400, `Menu "${n.id}": option ${d} label must contain words`);
         digits.add(d);
         return { digit: d, label: str(o.label, 80), next: str(o.next, 40), intent: str(o.intent, 40) };
       });
@@ -63,6 +67,7 @@ function validateFlow({ start, nodes }) {
       out.handoffNext = str(n.handoffNext, 40);
     }
     if (n.type === 'transfer') {
+      if (n.number && !Rules.isPhone(String(n.number))) throw new HttpError(400, `Transfer "${n.id}": enter a valid phone number (7-15 digits, no letters)`);
       out.number = normalize(n.number);
       if (!out.number) throw new HttpError(400, `Transfer "${n.id}" needs a phone number`);
     }

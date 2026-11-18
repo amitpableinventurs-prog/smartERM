@@ -2,7 +2,8 @@ const { z } = require('zod');
 const { Workflow, WorkflowRun } = require('../models');
 const { crud } = require('../utils/crud');
 const { authorize } = require('../middleware/auth');
-const { HttpError } = require('../utils/helpers');
+const { HttpError, assertValid } = require('../utils/helpers');
+const Rules = require('../../public/rules');
 const automation = require('../services/automation');
 const adsync = require('../services/adsync');
 
@@ -19,8 +20,13 @@ const definition = z.object({
   steps: z.array(step).optional(),
 }).passthrough();
 
-// Reject malformed definitions at save time instead of failing mid-run.
-const check = (data) => { definition.parse(data); };
+// Reject malformed definitions (and steps missing what they need, e.g. an SMS with no text) at save time instead of failing mid-run.
+const check = (data, current) => {
+  assertValid(data, 'workflow', current && { partial: true, current });
+  definition.parse(data);
+  const problems = Rules.workflowSteps(data.steps, data.trigger?.conditions);
+  if (problems.length) throw new HttpError(400, problems.join('; '), { problems });
+};
 
 const c = crud({
   Model: Workflow,
@@ -30,7 +36,7 @@ const c = crud({
   scope: false,
   hooks: {
     beforeCreate(req, data) { check(data); delete data.stats; delete data.isTemplate; },
-    beforeUpdate(req, doc, data) { check(data); delete data.stats; delete data.isTemplate; },
+    beforeUpdate(req, doc, data) { check(data, doc.toObject()); delete data.stats; delete data.isTemplate; },
     async beforeDelete(req, wf) { await WorkflowRun.deleteMany({ workflow: wf._id, status: { $in: ['waiting', 'running'] } }); },
   },
 });
