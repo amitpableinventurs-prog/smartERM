@@ -18,7 +18,7 @@ Object.assign(ICONS, {
 });
 
 // ---------- small helpers ----------
-const HUB_LABEL = { sms: 'SMS', whatsapp: 'WhatsApp', ivr: 'IVR calls', voice: 'Voice / IVR', call: 'Call' };
+const HUB_LABEL = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp', ivr: 'IVR calls', voice: 'Voice / IVR', call: 'Call' };
 const el = {
   input: (v, a = {}) => { const x = h('input', a); x.value = v ?? ''; return x; },
   area: (v, a = {}) => { const x = h('textarea', { class: 'plain', ...a }); x.value = v ?? ''; return x; },
@@ -707,12 +707,14 @@ MODULES.intentmap = { title: 'Intent Mapping', render: async (root) => {
 // ================= Providers =================
 MODULES.providers = { title: 'Channel Providers', render: async (root) => {
   const [meta, list, flows] = await Promise.all([api('/hub/providers/meta'), api('/hub/providers'), can('ivr', 'r') ? api('/hub/ivr/flows?limit=100').then((r) => r.data) : []]);
-  const NAMES = { simulated: 'Simulated (nothing is really sent)', twilio: 'Twilio', meta: 'Meta WhatsApp Cloud API', http: 'HTTP gateway (MSG91, Textlocal, Gupshup, Exotel…)' };
-  const FROM = { sms: 'Sender ID / number', whatsapp: 'WhatsApp business number', voice: 'Caller ID (your voice number)' };
+  const NAMES = { simulated: 'Simulated (nothing is really sent)', twilio: 'Twilio', meta: 'Meta WhatsApp Cloud API', http: 'HTTP gateway (MSG91, Textlocal, Gupshup, Exotel…)', smtp: 'SMTP' };
+  const FROM = { email: 'From email address', sms: 'Sender ID / number', whatsapp: 'WhatsApp business number', voice: 'Caller ID (your voice number)' };
   const HELP = {
     twilio: 'Twilio console › Phone Numbers › your number: paste "Incoming" into "A message comes in" (or "A call comes in" for voice). Delivery reports are sent automatically when PUBLIC_URL is set.',
     meta: 'Meta developer app › WhatsApp › Configuration: Callback URL = Incoming message URL, Verify token = the one you set above; subscribe to "messages". Delivery and read receipts come on the same URL.',
     http: 'Point your gateway\'s inbound-message webhook to "Incoming" (POST JSON {"from","body","name","id"}) and its delivery report webhook to "Status" ({"id","status"}). In URL / body templates use {{to}}, {{to_digits}}, {{to_national}}, {{from}}, {{body}}.',
+    smtp: 'Enter the SMTP host and port, then the login credentials supplied by your email provider. Port 465 uses SSL; other ports use STARTTLS when supported.',
+    email: 'Emails are sent through this SMTP connection. Inbound email replies are not collected here.',
     simulated: 'Simulated mode logs every message and call without sending it, so you can try campaigns, the AI inbox and IVR flows safely. You can still post test messages to the Incoming URL.',
   };
   const grid = h('div', { class: 'prov-grid' });
@@ -725,7 +727,7 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
     grid.append(box);
     const draw = (p) => {
       const prov = el.select(meta.allowed[p.channel].map((x) => [x, NAMES[x]]), p.provider);
-      const from = el.input(p.from, { placeholder: p.channel === 'sms' ? 'ACMECO or +1555…' : '+91…' });
+      const from = el.input(p.from, { type: p.channel === 'email' ? 'email' : 'text', placeholder: p.channel === 'sms' ? 'ACMECO or +1555…' : p.channel === 'email' ? 'sales@example.com' : '+91…' });
       const active = el.check(p.active);
       const fieldsBox = h('div', {});
       const inputs = {};
@@ -735,7 +737,7 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
         const same = prov.value === p.provider;
         setKids(fieldsBox, (meta.fields[prov.value] || []).map((f) => {
           const v = same ? p.config[f.k] : '';
-          const i = f.options ? el.select(f.options, v || f.options[0]) : f.multiline ? el.area(v, { rows: 3, placeholder: f.secret && v ? '(unchanged)' : '' }) : el.input(v, { placeholder: f.placeholder || '', autocomplete: 'off' });
+          const i = f.options ? el.select(f.options, v || f.options[0]) : f.multiline ? el.area(v, { rows: 3, placeholder: f.secret && v ? '(unchanged)' : '' }) : el.input(v, { type: f.secret ? 'password' : f.k === 'port' ? 'number' : 'text', placeholder: f.placeholder || '', autocomplete: 'off' });
           inputs[f.k] = i;
           return fld(f.label + (f.req ? ' *' : ''), i);
         }));
@@ -743,7 +745,7 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
       };
       prov.addEventListener('change', drawFields); drawFields();
       const flowSel = p.channel === 'voice' && el.select([['', '— the flow marked "inbound default" —'], ...flows.map((f) => [f._id, f.name])], p.inboundFlow || '');
-      const testTo = el.input('', { placeholder: 'Your number', style: 'max-width:170px' });
+      const testTo = el.input('', { type: p.channel === 'email' ? 'email' : 'text', placeholder: p.channel === 'email' ? 'you@example.com' : 'Your number', style: 'max-width:190px' });
       const save = guard(async () => {
         const body = { provider: prov.value, from: from.value.trim() || undefined, active: active.checked, config: Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value])) };
         if (flowSel) body.inboundFlow = flowSel.value || null;
@@ -777,18 +779,18 @@ MODULES.providers = { title: 'Channel Providers', render: async (root) => {
         } }]);
       });
       setKids(box,
-        h('div', { class: 'hd' }, h('h3', { class: 'ttl-ic' }, icon(p.channel === 'sms' ? 'bulksms' : p.channel === 'whatsapp' ? 'bulkwa' : 'ivrcalls'), HUB_LABEL[p.channel]),
+        h('div', { class: 'hd' }, h('h3', { class: 'ttl-ic' }, icon(p.channel === 'email' ? 'send' : p.channel === 'sms' ? 'bulksms' : p.channel === 'whatsapp' ? 'bulkwa' : 'ivrcalls'), HUB_LABEL[p.channel]),
           p.provider === 'simulated' ? h('span', { class: 'pill paused' }, 'Simulated') : h('span', { class: 'pill ' + (p.active ? 'active' : 'paused') }, NAMES[p.provider].split(' (')[0])),
         p.channel === 'voice' && meta.serverTwilio && can('hubsetup', 'u') && h('div', { class: 'infobar row' }, h('span', { class: 'grow' }, 'Twilio is set up on this server.'), h('button', { class: 'btn sm', onclick: connectTwilio }, 'Connect Twilio')),
         fld('Provider', prov), fld(FROM[p.channel], from), fieldsBox,
         flowSel && fld('Inbound calls are answered by', flowSel),
         inline(active, 'Active'), help,
         p.lastError && h('div', { class: 'warnbar' }, 'Last error: ' + p.lastError),
-        can('hubsetup', 'u') && h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn', onclick: save }, 'Save'), h('div', { class: 'grow' }), testTo, testTpl, h('button', { class: 'btn sec', onclick: test }, p.channel === 'voice' ? 'Test call' : 'Send test')),
+        can('hubsetup', 'u') && h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn', onclick: save }, 'Save'), h('div', { class: 'grow' }), testTo, testTpl, h('button', { class: 'btn sec', onclick: test }, p.channel === 'voice' ? 'Test call' : p.channel === 'email' ? 'Send test email' : 'Send test')),
         p.webhooks ? h('div', { class: 'hooks' }, h('label', {}, 'Webhook URLs for your provider'),
           Object.entries(p.webhooks).map(([k, u]) => copyRow(k === 'inbound' ? (p.channel === 'voice' ? 'Incoming call' : 'Incoming message') : 'Status / delivery report', u)),
           !p.publicUrlSet && p.provider !== 'simulated' && h('div', { class: 'warnbar' }, 'Set PUBLIC_URL in .env to your public https address so the provider can reach this server (needed for delivery reports and outbound calls).'))
-          : h('p', { class: 'muted' }, 'Save once to get the webhook URLs.'));
+          : p.channel === 'email' ? h('p', { class: 'muted' }, HELP.email) : h('p', { class: 'muted' }, 'Save once to get the webhook URLs.'));
     };
     draw(p0);
   }

@@ -1,22 +1,21 @@
 const nodemailer = require('nodemailer');
-const config = require('../config');
 const { Communication } = require('../models');
 const providers = require('./providers');
 const { normalize } = require('../utils/phone');
 const { isOptedOut } = require('./contacts');
 
-let transport;
-const mailer = () => (transport ||= nodemailer.createTransport({
-  host: config.smtp.host, port: config.smtp.port, secure: config.smtp.port === 465,
-  auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
-}));
-
 // Delivers through the company's provider for the channel (see Communication Hub > Providers),
 // otherwise marks the message "simulated". Returns { status, providerId }.
 async function deliver(company, channel, to, subject, body, opts) {
   if (channel === 'email') {
-    if (!config.smtp.host) return { status: 'simulated' };
-    await mailer().sendMail({ from: config.smtp.from, to, subject: subject || '(no subject)', text: body });
+    const prov = await providers.resolve(company, channel);
+    if (prov.type === 'simulated') return { status: 'simulated' };
+    const cfg = prov.cfg;
+    const transport = nodemailer.createTransport({
+      host: cfg.host, port: Number(cfg.port) || 587, secure: Number(cfg.port) === 465,
+      auth: cfg.user ? { user: cfg.user, pass: cfg.pass } : undefined,
+    });
+    await transport.sendMail({ from: prov.from, to, subject: subject || '(no subject)', text: body });
     return { status: 'sent' };
   }
   return providers.sendMessage(await providers.resolve(company, channel), channel, to, body, opts);

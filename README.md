@@ -16,7 +16,7 @@ Every `/api/*` route except `/api/auth/*` and `/api/webhooks/*` needs `Authoriza
 Data is isolated per company. Lists accept `?page=&limit=&sort=&q=` plus per-resource filters.
 
 AI works without keys (rule-based fallback; responses say `"engine":"heuristic"`). Set `GROQ_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY` (+ `AI_PROVIDER=groq|openai|gemini`) for LLM output.
-Email is logged as `simulated` until SMTP is set. SMS, WhatsApp and voice use the provider chosen per company under Communication Hub › Channel Providers (simulated by default; the `TWILIO_*` variables still work as a fallback for SMS/WhatsApp).
+Email uses the SMTP provider configured per company under Communication Hub › Channel Providers (simulated by default); `SMTP_*` / `MAIL_FROM` environment settings remain a fallback for companies without a saved email provider. SMS, WhatsApp and voice use the provider chosen per company under Communication Hub › Channel Providers (simulated by default; the `TWILIO_*` variables still work as a fallback for SMS/WhatsApp).
 
 ## Web panels
 

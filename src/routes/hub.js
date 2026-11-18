@@ -19,6 +19,7 @@ const ai = require('../services/ai');
 const { safeFilter } = require('../services/campaigns');
 
 const router = express.Router();
+const PROVIDER_CHANNELS = [...M.HUB_CHANNELS, 'email'];
 router.use(express.text({ type: ['text/csv', 'text/plain'], limit: '5mb' }));
 // crud sub-routers audit themselves; these are the other mutating endpoints.
 router.use(['/providers', '/bot', '/conversations', '/ivr/call'], audit('hub'));
@@ -76,7 +77,7 @@ router.get('/overview', authorize('hub', 'r'), async (req, res) => {
     daily: dayKeys.map((d) => ({ date: d, sms: 0, whatsapp: 0, call: 0, ...Object.fromEntries(daily.filter((x) => x._id.d === d).map((x) => [x._id.c, x.n])) })),
     optOuts, recentBroadcasts: recent,
     broadcasts: Object.fromEntries(bc.map((x) => [x._id, x.n])),
-    providers: M.HUB_CHANNELS.map((c) => { const p = provs.find((x) => x.channel === c); return { channel: c, provider: p?.active ? p.provider : 'simulated' }; }),
+    providers: PROVIDER_CHANNELS.map((c) => { const p = provs.find((x) => x.channel === c); return { channel: c, provider: p?.active ? p.provider : 'simulated' }; }),
     aiMode: ai.hasKey() ? 'llm' : 'rules',
   });
 });
@@ -103,15 +104,15 @@ router.get('/providers/meta', authorize('hubsetup', 'r'), (_req, res) => res.jso
 
 router.get('/providers', authorize('hubsetup', 'r'), async (req, res) => {
   const list = await M.ChannelProvider.find({ company: req.companyId }).select('+credentials');
-  res.json(M.HUB_CHANNELS.map((c) => providerView(req, c, list.find((p) => p.channel === c))));
+  res.json(PROVIDER_CHANNELS.map((c) => providerView(req, c, list.find((p) => p.channel === c))));
 });
 
 router.put('/providers/:channel', authorize('hubsetup', 'u'), validate(z.object({
-  provider: z.enum(['simulated', 'twilio', 'meta', 'http']), from: z.string().max(60).optional(), active: z.boolean().optional(),
+  provider: z.enum(['simulated', 'twilio', 'meta', 'http', 'smtp']), from: z.string().max(254).optional(), active: z.boolean().optional(),
   config: z.record(z.string(), z.any()).optional(), inboundFlow: oid.nullable().optional(),
 })), async (req, res) => {
   const { channel } = req.params;
-  if (!M.HUB_CHANNELS.includes(channel)) throw new HttpError(404, 'Unknown channel');
+  if (!PROVIDER_CHANNELS.includes(channel)) throw new HttpError(404, 'Unknown channel');
   const b = req.body;
   if (!providers.ALLOWED[channel].includes(b.provider)) throw new HttpError(400, `${b.provider} does not support ${channel}`);
   if (b.inboundFlow && !(await M.IvrFlow.exists({ _id: b.inboundFlow, company: req.companyId }))) throw new HttpError(400, 'IVR flow not found');
@@ -120,6 +121,7 @@ router.put('/providers/:channel', authorize('hubsetup', 'u'), validate(z.object(
   let cfg;
   try { cfg = providers.mergeConfig(b.provider, old, b.config); } catch (e) { throw new HttpError(e.status || 400, e.message); }
   if (b.provider !== 'simulated' && b.provider !== 'meta' && !b.from) throw new HttpError(400, 'Sender number / ID is required');
+  if (b.provider === 'smtp' && !z.string().email().safeParse(b.from).success) throw new HttpError(400, 'Enter a valid sender email address');
   p ||= new M.ChannelProvider({ company: req.companyId, channel });
   p.set({ provider: b.provider, from: b.from, active: b.active ?? true, credentials: providers.seal(cfg), lastError: undefined });
   if (channel === 'voice') p.inboundFlow = b.inboundFlow || undefined;
@@ -129,12 +131,13 @@ router.put('/providers/:channel', authorize('hubsetup', 'u'), validate(z.object(
 
 // WhatsApp `template` (approved template name, e.g. hello_world) reaches numbers that have not messaged you in the last 24h.
 router.post('/providers/:channel/test', authorize('hubsetup', 'u'), validate(z.object({
-  to: z.string().min(6).max(30), body: z.string().max(500).optional(),
+  to: z.string().min(6).max(320), body: z.string().max(500).optional(),
   template: z.string().max(120).optional(), language: z.string().max(20).optional(),
 })), async (req, res) => {
   const { channel } = req.params;
-  if (!M.HUB_CHANNELS.includes(channel)) throw new HttpError(404, 'Unknown channel');
-  const to = normalize(req.body.to);
+  if (!PROVIDER_CHANNELS.includes(channel)) throw new HttpError(404, 'Unknown channel');
+  const to = channel === 'email' ? req.body.to.trim() : normalize(req.body.to);
+  if (channel === 'email' && !z.string().email().safeParse(to).success) throw new HttpError(400, 'Enter a valid email address');
   const prov = await providers.resolve(req.companyId, channel);
   try {
     if (channel === 'voice') {

@@ -1392,7 +1392,7 @@ const SUBS = {
   bulksms: 'Send SMS to CRM segments or uploaded lists', bulkwa: 'WhatsApp broadcasts with templates and media', ivrcalls: 'Automated voice call campaigns driven by IVR flows',
   ivrflows: 'Design menus, AI voice agents, transfers and voicemail', calllogs: 'Every IVR call with transcript, intent and AI summary',
   aibot: 'What the AI assistant knows and when it hands over', intentmap: 'What happens in the CRM when the AI detects an intent',
-  providers: 'Connect SMS, WhatsApp and voice gateways', dnd: 'Numbers that must never be messaged or called', adutm: 'Tracking links and landing-page form setup', company: 'Workspace settings and integrations', notifications: 'Alerts and assignments',
+  providers: 'Connect email SMTP, SMS, WhatsApp and voice providers', dnd: 'Numbers that must never be messaged or called', adutm: 'Tracking links and landing-page form setup', company: 'Workspace settings and integrations', notifications: 'Alerts and assignments',
 };
 
 // ---------- auth screen & shell ----------

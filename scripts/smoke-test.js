@@ -814,7 +814,7 @@ async function waitFor(fn, ms = 8000) {
 
   await test('hub: providers default to simulated and secrets are encrypted + masked', async () => {
     const list = (await call('GET', '/api/hub/providers', null, admin)).body;
-    assert.deepEqual(list.map((p) => p.provider), ['simulated', 'simulated', 'simulated']);
+    assert.deepEqual(list.map((p) => p.provider), ['simulated', 'simulated', 'simulated', 'simulated']);
     const r = await call('PUT', '/api/hub/providers/sms', { provider: 'twilio', from: '+15550000', config: { accountSid: 'AC123', authToken: 'supersecret99' } }, admin);
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.config.authToken, '••••et99');
@@ -830,6 +830,45 @@ async function waitFor(fn, ms = 8000) {
     waHook = hookPath((await call('PUT', '/api/hub/providers/whatsapp', { provider: 'simulated' }, admin)).body.webhooks.inbound);
     voiceHook = hookPath((await call('PUT', '/api/hub/providers/voice', { provider: 'simulated' }, admin)).body.webhooks.inbound);
     assert.equal((await postJson('/api/webhooks/comm/not-a-token/sms', { from: '+15551', body: 'x' })).status, 404);
+  });
+
+  await test('hub: SMTP settings are encrypted, masked, and used for test email', async () => {
+    const config = { host: 'smtp.example.test', port: '465', user: 'mailer@example.test', pass: 'smtp-secret' };
+    const saved = await call('PUT', '/api/hub/providers/email', { provider: 'smtp', from: 'sales@example.test', config }, admin);
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.config.pass, '••••cret');
+    assert.equal(saved.body.config.user, '••••test');
+    assert.equal((await call('PUT', '/api/hub/providers/email', {
+      provider: 'smtp', from: 'sales@example.test', config: { ...config, user: '••••test', pass: '••••cret' },
+    }, admin)).status, 200);
+    assert.equal((await call('PUT', '/api/hub/providers/email', {
+      provider: 'smtp', from: 'sales@example.test', config: { ...config, port: '70000' },
+    }, admin)).status, 400);
+    const stored = await mongoose.model('ChannelProvider').findOne({ channel: 'email' }).select('+credentials');
+    assert(!stored.credentials.includes('smtp-secret'));
+    assert.equal(require('../src/services/providers').unseal(stored.credentials).pass, 'smtp-secret');
+
+    const nodemailer = require('nodemailer');
+    const createTransport = nodemailer.createTransport;
+    let delivery;
+    nodemailer.createTransport = (options) => ({
+      sendMail: async (message) => { delivery = { options, message }; return { messageId: 'smtp-test-id' }; },
+    });
+    try {
+      const sent = await call('POST', '/api/hub/providers/email/test', { to: 'buyer@example.test', body: 'SMTP test' }, admin);
+      assert.equal(sent.status, 200, JSON.stringify(sent.body));
+      assert.equal(sent.body.provider, 'smtp');
+      assert.equal(sent.body.status, 'sent');
+      assert.equal(delivery.options.host, config.host);
+      assert.equal(delivery.options.port, 465);
+      assert.equal(delivery.options.secure, true);
+      assert.deepEqual(delivery.options.auth, { user: config.user, pass: config.pass });
+      assert.equal(delivery.message.from, 'sales@example.test');
+      assert.equal(delivery.message.to, 'buyer@example.test');
+      assert.equal((await call('POST', '/api/hub/providers/email/test', { to: 'not-an-email', body: 'test' }, admin)).status, 400);
+    } finally {
+      nodemailer.createTransport = createTransport;
+    }
   });
 
   await test('hub: bulk SMS maps CSV numbers to CRM leads, skips DND, tracks delivery and replies', async () => {

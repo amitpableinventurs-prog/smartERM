@@ -516,8 +516,8 @@ const HUB_CHANNELS = ['sms', 'whatsapp', 'voice'];
 // One provider per channel per company. Credentials are an encrypted JSON blob (see services/providers.js).
 const ChannelProvider = make('ChannelProvider', {
   ...scoped,
-  channel: { type: String, enum: HUB_CHANNELS, required: true },
-  provider: { type: String, enum: ['simulated', 'twilio', 'meta', 'http'], default: 'simulated' },
+  channel: { type: String, enum: [...HUB_CHANNELS, 'email'], required: true },
+  provider: { type: String, enum: ['simulated', 'twilio', 'meta', 'http', 'smtp'], default: 'simulated' },
   from: String, // sender id / number
   active: { type: Boolean, default: true },
   credentials: { type: String, select: false },

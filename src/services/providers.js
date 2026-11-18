@@ -1,10 +1,11 @@
 /**
- * Channel provider adapters for SMS, WhatsApp and voice.
+ * Channel provider adapters for email, SMS, WhatsApp and voice.
  *
  *   simulated  - nothing leaves the server; messages are logged with status "simulated"
  *   twilio     - SMS, WhatsApp and voice (TwiML)
  *   meta       - WhatsApp Cloud API (graph.facebook.com)
  *   http       - any gateway with an HTTP API (MSG91, Textlocal, Gupshup, Exotel, ...): url + body template
+ *   smtp       - SMTP email delivery
  *
  * Credentials are stored AES-256-GCM encrypted and are never returned to the browser in clear text.
  */
@@ -57,8 +58,14 @@ const FIELDS = {
     { k: 'bodyTemplate', label: 'Body template, e.g. {"to":"{{to}}","text":"{{body}}"}', secret: true, multiline: true },
     { k: 'idPath', label: 'Message id path in the JSON response (e.g. data.id)' },
   ],
+  smtp: [
+    { k: 'host', label: 'SMTP host', req: true },
+    { k: 'port', label: 'SMTP port', placeholder: '587' },
+    { k: 'user', label: 'Username', secret: true },
+    { k: 'pass', label: 'Password', secret: true },
+  ],
 };
-const ALLOWED = { sms: ['simulated', 'twilio', 'http'], whatsapp: ['simulated', 'twilio', 'meta', 'http'], voice: ['simulated', 'twilio', 'http'] };
+const ALLOWED = { sms: ['simulated', 'twilio', 'http'], whatsapp: ['simulated', 'twilio', 'meta', 'http'], voice: ['simulated', 'twilio', 'http'], email: ['simulated', 'smtp'] };
 
 const mask = (v) => (v ? '••••' + String(v).slice(-4) : '');
 const isMasked = (v) => typeof v === 'string' && v.startsWith('••••');
@@ -79,6 +86,11 @@ function mergeConfig(provider, oldCfg, incoming = {}, table = FIELDS) {
     if (v !== undefined && v !== '') out[f.k] = String(v).slice(0, 4000);
   }
   if (out.headers) { try { JSON.parse(out.headers); } catch { throw Object.assign(new Error('headers must be valid JSON'), { status: 400 }); } }
+  if (provider === 'smtp' && out.port) {
+    const port = Number(out.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw Object.assign(new Error('SMTP port must be between 1 and 65535'), { status: 400 });
+    out.port = String(port);
+  }
   const missing = (table[provider] || []).filter((f) => f.req && !out[f.k]).map((f) => f.label);
   if (missing.length) throw Object.assign(new Error(`Missing: ${missing.join(', ')}`), { status: 400 });
   return out;
@@ -89,8 +101,15 @@ function mergeConfig(provider, oldCfg, incoming = {}, table = FIELDS) {
 const serverTwilio = () => (config.twilio.sid && config.twilio.token ? { accountSid: config.twilio.sid, authToken: config.twilio.token } : null);
 
 async function resolve(company, channel) {
-  const p = company && (await M.ChannelProvider.findOne({ company, channel, active: true }).select('+credentials'));
+  const p = company && (await M.ChannelProvider.findOne({ company, channel }).select('+credentials'));
+  if (p && !p.active) return { type: 'simulated' };
   if (p) return { type: p.provider, from: p.from, cfg: unseal(p.credentials), doc: p };
+  if (channel === 'email' && config.smtp.host) {
+    return {
+      type: 'smtp', from: config.smtp.from,
+      cfg: { host: config.smtp.host, port: config.smtp.port, user: config.smtp.user, pass: config.smtp.pass },
+    };
+  }
   // Legacy: Twilio configured in .env keeps working for SMS/WhatsApp. Voice needs a provider record
   // (its webhook token routes calls to the company): Channel Providers > Voice > Connect Twilio.
   const env = channel !== 'voice' && serverTwilio();
